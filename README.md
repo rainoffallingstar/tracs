@@ -1,4 +1,4 @@
-# tracktools
+# tracs
 
 Rust 实现的最小 `bwtool` 替代，用于本仓库的 `trackplot.R`（只覆盖用到的子命令）：
 
@@ -16,7 +16,7 @@ cd .
 CARGO_HOME=/tmp/cargo-home CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse cargo build --release
 ```
 
-产物：`target/release/tracktools`
+产物：`target/release/tracs`
 
 ## 测试（自动化对齐检查）
 
@@ -60,7 +60,7 @@ export XDG_CACHE_HOME=/tmp/tracktools-xdg-cache
 1) 只替换 `bwtool`（`trackplot.R` 仍然在 R 里生成窗口并逐个调用子命令）：
 
 ```r
-Sys.setenv(TRACKTOOLS_BWTOOL_CMD = "./target/release/tracktools")
+Sys.setenv(TRACKTOOLS_BWTOOL_CMD = "./target/release/tracs")
 ```
 
 之后 `trackplot.R` 里原本调用 `bwtool summary/matrix` 的地方会自动改用该命令。
@@ -68,7 +68,7 @@ Sys.setenv(TRACKTOOLS_BWTOOL_CMD = "./target/release/tracktools")
 2) 让 Rust 接管 `track_extract()` 的“画图前步骤”（窗口生成 + bigWig 取值 + 可选 GTF 查 gene 模型）：
 
 ```r
-Sys.setenv(TRACKTOOLS_TRACKPREP_CMD = "./target/release/tracktools")
+Sys.setenv(TRACKTOOLS_TRACKPREP_CMD = "./target/release/tracs")
 ```
 
 当 `TRACKTOOLS_TRACKPREP_CMD` 被设置时，`trackplot.R` 的 `track_extract()` 会调用 `track-extract` 并读取 `tracks.tsv/meta.tsv`，不再依赖 conda/bwtool。
@@ -91,7 +91,7 @@ Sys.setenv(TRACKTOOLS_TRACKPREP_CMD = "./target/release/tracktools")
 ## Rust 主程序直接出图（推荐）
 
 ```bash
-./target/release/tracktools plot \
+./target/release/tracs plot \
   --trackplot-r trackplot.R \
   --out out.pdf \
   --gene SLC19A1 --build hg19 --binsize 200 \
@@ -107,7 +107,7 @@ localdata/data/GSE199964_RAW/H3K27ac_1.bigWig\tH3K27ac_1
 localdata/data/GSE199964_RAW/H3K4me3_1.bigWig\tH3K4me3_1
 EOF
 
-./target/release/tracktools plot \
+./target/release/tracs plot \
   --out out.pdf \
   --loci chr1:158145820-158156686 \
   --binsize 200 \

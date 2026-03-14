@@ -19,7 +19,7 @@ use serde_json::Value as JsonValue;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "tracktools",
+    name = "tracs",
     about = "Rust replacements for bwtool commands used by trackplot.R (summary/matrix), plus optional higher-level helpers",
     version
 )]
@@ -2186,7 +2186,7 @@ fn mygene_lookup(
         return Ok(None);
     }
     let client = match reqwest::blocking::Client::builder()
-        .user_agent("tracktools/0.1")
+        .user_agent("tracs/0.1")
         .timeout(Duration::from_secs(8))
         .build()
     {

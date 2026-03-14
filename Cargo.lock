@@ -1651,7 +1651,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tracktools"
+name = "tracs"
 version = "0.1.0"
 dependencies = [
  "anyhow",

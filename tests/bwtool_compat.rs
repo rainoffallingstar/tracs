@@ -288,7 +288,7 @@ fn header_col_idx(header: &[String], name: &str) -> Option<usize> {
 }
 
 fn tracktools_exe() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_tracktools"))
+    PathBuf::from(env!("CARGO_BIN_EXE_tracs"))
 }
 
 fn mini_gtf() -> PathBuf {

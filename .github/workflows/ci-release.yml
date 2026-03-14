@@ -103,14 +103,14 @@ jobs:
           mkdir -p dist
           short_sha="${GITHUB_SHA:0:7}"
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            bin="target/release/tracktools.exe"
+            bin="target/release/tracs.exe"
             ext="exe"
           else
-            bin="target/release/tracktools"
+            bin="target/release/tracs"
             ext="bin"
           fi
           test -f "$bin"
-          out="dist/tracktools-${{ runner.os }}-${{ steps.tag.outputs.tag }}-${short_sha}-${GITHUB_RUN_NUMBER}.${ext}"
+          out="dist/tracs-${{ runner.os }}-${{ steps.tag.outputs.tag }}-${short_sha}-${GITHUB_RUN_NUMBER}.${ext}"
           cp "$bin" "$out"
           echo "file=$out" >> "$GITHUB_OUTPUT"
 
