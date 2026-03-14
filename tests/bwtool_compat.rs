@@ -812,7 +812,7 @@ fn track_extract_gene_max_matches_bwtool_summary_when_available() -> Result<()> 
 
         // Compare max per bin row-wise.
         let mut bin_i = 0usize;
-        for (i, r) in track_rows.iter().enumerate().skip(1) {
+        for r in track_rows.iter().skip(1) {
             if r.len() < 6 {
                 continue;
             }
