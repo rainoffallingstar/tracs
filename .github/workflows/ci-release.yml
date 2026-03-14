@@ -91,7 +91,7 @@ jobs:
             ext="bin"
           fi
           test -f "$bin"
-          out="dist/tracktools-${{ runner.os }}-${short_sha}.${ext}"
+          out="dist/tracktools-${{ runner.os }}-${{ steps.tag.outputs.tag }}-${short_sha}-${GITHUB_RUN_NUMBER}.${ext}"
           cp "$bin" "$out"
           echo "file=$out" >> "$GITHUB_OUTPUT"
 
@@ -100,4 +100,5 @@ jobs:
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: ${{ steps.tag.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           files: ${{ steps.pkg.outputs.file }}
