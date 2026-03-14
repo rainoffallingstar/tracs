@@ -1,0 +1,18 @@
+/localdata/
+/target/
+
+# Rust
+**/*.rs.bk
+
+# Editors/OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# R
+.Rhistory
+.RData
+.Rproj.user/
+_Rproj.user/

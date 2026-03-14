@@ -1,0 +1,103 @@
+name: ci-release
+
+on:
+  pull_request:
+  push:
+    branches: ["main", "master"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set up micromamba (bwtool)
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: tracktools-bwtool
+          create-args: >-
+            -c pwwang -c bioconda/label/cf201901 -c conda-forge/label/cf201901
+            bwtool htslib openssl=1.0.2h
+          cache-environment: true
+
+      - name: Download GEO test data (GSE199964_RAW.tar)
+        shell: bash
+        run: |
+          set -euo pipefail
+          SERIES="GSE199964"
+          GROUP="${SERIES:0:${#SERIES}-3}nnn"
+          URL="https://ftp.ncbi.nlm.nih.gov/geo/series/${GROUP}/${SERIES}/suppl/${SERIES}_RAW.tar"
+          mkdir -p localdata/data
+          mkdir -p "localdata/data/${SERIES}_RAW"
+          curl -L --retry 5 --retry-delay 2 -o "/tmp/${SERIES}_RAW.tar" "$URL"
+          tar -xf "/tmp/${SERIES}_RAW.tar" -C "localdata/data/${SERIES}_RAW"
+          ls -la "localdata/data/${SERIES}_RAW" | head
+
+      - name: Run tests (incl. bwtool alignment)
+        env:
+          TRACKTOOLS_TEST_BWTOOL_ENV: tracktools-bwtool
+          TRACKTOOLS_GENE_LOOKUP: online
+          TRACKTOOLS_TEST_ENABLE_GENE: "1"
+          XDG_CACHE_HOME: /tmp/tracktools-xdg-cache
+        run: cargo test --locked
+
+  release:
+    needs: test
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (release)
+        run: cargo build --release --locked
+
+      - name: Compute date tag (UTC)
+        id: tag
+        shell: bash
+        run: echo "tag=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Package binary
+        id: pkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          short_sha="${GITHUB_SHA:0:7}"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            bin="target/release/tracktools.exe"
+            ext="exe"
+          else
+            bin="target/release/tracktools"
+            ext="bin"
+          fi
+          test -f "$bin"
+          out="dist/tracktools-${{ runner.os }}-${short_sha}.${ext}"
+          cp "$bin" "$out"
+          echo "file=$out" >> "$GITHUB_OUTPUT"
+
+      - name: Upload GitHub Release asset (tag = date)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          files: ${{ steps.pkg.outputs.file }}
