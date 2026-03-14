@@ -1,11 +1,12 @@
 # tracs
 
-Rust 实现的最小 `bwtool` 替代，用于本仓库的 `trackplot.R`（只覆盖用到的子命令）：
+`trackplot-rs` 的命令行工具：用 Rust 原生实现 `trackplot.R` 画图前所需的 bigWig 取值与整理流程（并兼容替代 `bwtool` 的 `summary/matrix` 子命令）。R 只负责最终出图。
 
-- `summary`：对应 `bwtool summary -with-sum -keep-bed -header <bed> <bigwig> <out>`
-- `matrix`：对应 `bwtool matrix -starts/-ends -tiled-averages=<bin> <up:down> <bed> <bigwig> <out>`
-- `track-extract`：更高层的一次性提取（多 bigWig + loci/gene + binsize），供 `trackplot.R` 直接调用
-- `plot-track`：Rust 作为主程序，内部调用 `track-extract`，然后调用 `Rscript` 输出 PDF
+核心能力：
+- `summary`：兼容 `bwtool summary -with-sum -keep-bed -header <bed> <bigwig> <out>`
+- `matrix`：兼容 `bwtool matrix -starts/-ends -tiled-averages=<bin> <up:down> <bed> <bigwig> <out>`
+- `track-extract`：更高层的一次性提取（多 bigWig + loci/gene + binsize + 可选 gene 模型/ideogram），供 `trackplot.R` 直接消费
+- `plot-track`（别名 `plot`）：Rust 主程序一键调用 `track-extract` + `Rscript trackplot.R` 输出 PDF（默认自动分配配色）
 
 ## 构建
 
@@ -18,6 +19,14 @@ CARGO_HOME=/tmp/cargo-home CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse cargo buil
 
 产物：`target/release/tracs`
 
+查看帮助：
+
+```bash
+./target/release/tracs --help
+./target/release/tracs track-extract --help
+./target/release/tracs plot --help
+```
+
 ## 测试（自动化对齐检查）
 
 ```bash
@@ -26,7 +35,8 @@ CARGO_HOME=/tmp/cargo-home CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse cargo test
 ```
 
 说明：
-- 测试会用仓库自带的 `localdata/data/GSE199964_RAW/H3K27ac_1.bigWig` 在固定 loci 上验证 `summary/matrix/track-extract` 的数值正确性。
+- CI 会从 GEO `GSE199964` 下载 `GSE199964_RAW.tar` 并解压出若干 `.bigWig/.bw` 作为端到端测试数据源（不提交到 Git）。
+- 本地测试默认读取 `localdata/data/GSE199964_RAW/`（可用 `TRACKTOOLS_TESTDATA_DIR` 覆盖），并在固定 loci 上验证 `summary/matrix/track-extract` 的数值正确性。
 - 如果系统里额外安装了 `bwtool`（PATH 可找到），测试会再跑一遍 `bwtool summary/matrix` 并逐列对比，作为“旧 bwtool 路径”的对齐校验；没安装则自动跳过该对比用例。
 - 如果 `bwtool` 只在 mamba 环境里，可通过设置 `TRACKTOOLS_TEST_BWTOOL_ENV=<env>` 让测试用 `micromamba run -n <env> bwtool ...`（优先）或 `conda run -n <env> bwtool ...` 来完成对齐对比（取决于系统里可用的 runner）。
 - 如果你的 micromamba root prefix 不在默认位置，额外设置 `TRACKTOOLS_TEST_MICROMAMBA_ROOT=<root>`（等价于传 `micromamba run -r <root> ...`）。
@@ -76,9 +86,9 @@ Sys.setenv(TRACKTOOLS_TRACKPREP_CMD = "./target/release/tracs")
 兼容性：旧的 `GREATCHIP_BWTOOL_CMD` / `GREATCHIP_TRACKPREP_CMD` 仍然可用，但不再推荐。
 
 说明：
-- `track-extract --gene <SYMBOL>` 默认通过 UCSC `refGene`（Rust 原生 MySQL 客户端）解析基因坐标/外显子（需要网络）。
-- 如果你传的是 Ensembl 基因 ID（例如 `ENSG...`），可以额外提供 `--gtf` 走本地 GTF，不需要网络。
-- `track-extract` 默认也会从 UCSC 拉取 `cytoBand`（输出 `cytoband.tsv`），用于 `track_plot(show_ideogram=TRUE)` 画 ideogram。
+- `track-extract --gene <...>` 默认通过 UCSC `refGene`（Rust 原生 MySQL 客户端）解析基因坐标/外显子（需要网络）。
+- 如果提供 `--gtf`，会优先走本地 GTF 做离线查找（推荐在离线环境使用）。
+- `track-extract` 默认会从 UCSC 拉取 `cytoBand`（输出 `cytoband.tsv`），用于 `track_plot(show_ideogram=TRUE)` 画 ideogram；不需要 ideogram 时可加 `--no-cytoband` 跳过。
 
 如果你不需要 ideogram，可以在 CLI 里加 `--no-cytoband` 跳过。
 
@@ -86,7 +96,7 @@ Sys.setenv(TRACKTOOLS_TRACKPREP_CMD = "./target/release/tracs")
 - 未指定 `--gtf`：会把输入归一化为 **gene symbol**（支持传 symbol / Entrez / ENSG），再去查 UCSC `refGene.name2`。
 - 指定了 `--gtf`：会把输入归一化为 **ENSG**（支持传 symbol / Entrez / ENSG），优先用本地 GTF 做离线查找。
 - 本地转换默认使用 `org.Hs.eg.db` 的 sqlite（通过系统 `sqlite3` 读取）。可用 `TRACKTOOLS_ORGDB_SQLITE=/path/to/org.Hs.eg.sqlite` 覆盖路径。
-- 如果没有本地 orgdb，但你希望在线转换，可设置 `TRACKTOOLS_GENE_LOOKUP=online`（需要可联网；使用 mygene.info REST，Rust 内置实现）。
+- 如果没有本地 orgdb，但你希望在线转换，可设置 `TRACKTOOLS_GENE_LOOKUP=online`（需要可联网；使用 mygene.info REST，Rust 内置实现，纯 Rust：reqwest + rustls）。
 
 ## Rust 主程序直接出图（推荐）
 
@@ -119,4 +129,10 @@ EOF
   --show-axis true
 ```
 
-常用 `track_plot()` 参数已映射为 CLI 参数（例如 `--y-max/--y-min`、`--bw-ord`、`--layout-ord`、`--bw-track-height`、`--gene-track-height`、`--cytoband-track-height`、`--regions-bed`、`--boxcol/--boxcolalpha`）。
+说明：
+- 默认不需要显式指定颜色：`--col auto` 会自动为 tracks 分配离散色盘；也可以传 `--col "#d34,#2980b9,..."` 手动指定。
+- 常用 `track_plot()` 参数已映射为 CLI 参数（例如 `--y-max/--y-min`、`--bw-ord`、`--layout-ord`、`--bw-track-height`、`--gene-track-height`、`--cytoband-track-height`、`--regions-bed`、`--boxcol/--boxcolalpha`）。
+
+## Release
+
+GitHub Actions 会按日历日期（UTC）发布 Release tag（`YYYYMMDD`），同一天内多次构建会复用同一个 tag，并把不同平台产物作为 assets 上传到同一个 Release。
