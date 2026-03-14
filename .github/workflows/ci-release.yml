@@ -41,6 +41,16 @@ jobs:
           mkdir -p "localdata/data/${SERIES}_RAW"
           curl -L --retry 5 --retry-delay 2 -o "/tmp/${SERIES}_RAW.tar" "$URL"
           tar -xf "/tmp/${SERIES}_RAW.tar" -C "localdata/data/${SERIES}_RAW"
+          # Handle nested directory layouts.
+          if [[ -d "localdata/data/${SERIES}_RAW/${SERIES}_RAW" ]]; then
+            mv "localdata/data/${SERIES}_RAW/${SERIES}_RAW"/* "localdata/data/${SERIES}_RAW"/
+            rmdir "localdata/data/${SERIES}_RAW/${SERIES}_RAW"
+          fi
+          # Some GEO raw bundles may ship gz-compressed bigWigs.
+          shopt -s nullglob
+          for f in "localdata/data/${SERIES}_RAW"/*.bigWig.gz "localdata/data/${SERIES}_RAW"/*.bw.gz; do
+            gunzip -f "$f"
+          done
           ls -la "localdata/data/${SERIES}_RAW" | head
 
       - name: Run tests (incl. bwtool alignment)
