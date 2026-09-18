@@ -9,5 +9,7 @@
 //! ideogram) whose order and relative heights come from `layout_ord`.
 
 pub mod fonts;
+pub mod io;
 pub mod layout;
 pub mod pretty;
+pub mod svg;
