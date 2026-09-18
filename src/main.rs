@@ -17,6 +17,8 @@ use mysql::params;
 use mysql::prelude::Queryable;
 use serde_json::Value as JsonValue;
 
+mod plot;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "tracs",
