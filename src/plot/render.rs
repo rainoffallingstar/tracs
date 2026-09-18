@@ -405,6 +405,7 @@ pub fn render_work_dir(
 }
 
 /// Convenience for tests: renders to PDF bytes without touching the filesystem.
+#[allow(dead_code)]
 pub fn render_pdf_bytes(inputs: &RenderInputs, options: &RenderOptions) -> Result<Vec<u8>> {
     let svg_document = render_svg(inputs, options)?;
     svg_to_pdf(&svg_document)

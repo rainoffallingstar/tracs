@@ -49,11 +49,12 @@ pub fn font_database() -> Database {
 
 /// Builds `usvg` options wired to [`font_database`].
 pub fn usvg_options() -> svg2pdf::usvg::Options<'static> {
-    let mut options = svg2pdf::usvg::Options::default();
-    options.fontdb = std::sync::Arc::new(font_database());
-    // Charts should not depend on the host locale for text shaping defaults.
-    options.font_family = FALLBACK_FAMILY.to_string();
-    options
+    svg2pdf::usvg::Options {
+        fontdb: std::sync::Arc::new(font_database()),
+        // Charts should not depend on the host locale for text shaping defaults.
+        font_family: FALLBACK_FAMILY.to_string(),
+        ..svg2pdf::usvg::Options::default()
+    }
 }
 
 #[cfg(test)]
@@ -87,8 +88,10 @@ mod tests {
         database.load_font_data(FALLBACK_FONT.to_vec());
         database.set_sans_serif_family(FALLBACK_FAMILY);
 
-        let mut options = svg2pdf::usvg::Options::default();
-        options.fontdb = std::sync::Arc::new(database);
+        let options = svg2pdf::usvg::Options {
+            fontdb: std::sync::Arc::new(database),
+            ..svg2pdf::usvg::Options::default()
+        };
 
         // A font stack like the one the renderer emits, ending in `sans-serif`.
         let svg = r#"<svg width="120" height="40" xmlns="http://www.w3.org/2000/svg">

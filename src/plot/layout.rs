@@ -36,6 +36,7 @@ pub enum TrackKind {
 
 impl TrackKind {
     /// The single-letter key used by `layout_ord`.
+    #[allow(dead_code)] // used by the oracle tests to express expected layouts
     pub fn key(self) -> char {
         match self {
             TrackKind::Peaks => 'p',
@@ -52,6 +53,7 @@ impl TrackKind {
     /// `track_plot()` sets different margins per track type; at R's default 0.2in
     /// line height one unit is 14.4pt. The `left` entry is a placeholder because
     /// the real value comes from `left_mar`.
+    #[allow(dead_code)] // called from render.rs; the lint only sees the bin target
     pub fn margins_lines(self) -> [f64; 4] {
         match self {
             // peaks: mar = c(0.25, left_mar, 0.25, 1)
@@ -147,6 +149,7 @@ pub struct Layout {
 
 impl Layout {
     /// Panel heights as a fraction of the total, for pixel allocation.
+    #[allow(dead_code)] // the renderer scales by total_height directly
     pub fn fractional_heights(&self) -> Vec<f64> {
         if self.total_height <= 0.0 {
             return vec![0.0; self.panels.len()];

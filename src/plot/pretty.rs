@@ -34,17 +34,14 @@ pub struct Pretty {
 }
 
 impl Pretty {
-    /// Tick positions as a `Vec<f64>`, for direct use as scale breaks.
-    pub fn breaks(&self) -> Vec<f64> {
-        self.values.clone()
-    }
-
     /// First tick, i.e. R's `z$l` (the lower bound after `bounds = TRUE`).
+    #[allow(dead_code)] // exercised by the oracle test, which checks bounds cover the input
     pub fn low(&self) -> f64 {
         self.values.first().copied().unwrap_or(0.0)
     }
 
     /// Last tick, i.e. R's `z$u`.
+    #[allow(dead_code)] // exercised by the oracle test, which checks bounds cover the input
     pub fn high(&self) -> f64 {
         self.values.last().copied().unwrap_or(0.0)
     }
@@ -54,12 +51,13 @@ impl Pretty {
 ///
 /// Non-finite inputs are dropped, matching R. An empty (or all-non-finite) input
 /// yields no ticks, and a degenerate `lo == up` is handled the way R does.
+#[allow(dead_code)] // the slice form of R's API; callers here use `pretty_range`
 pub fn pretty(x: &[f64]) -> Pretty {
     pretty_with(x, DEFAULT_N)
 }
 
 /// `pretty.default()` with an explicit `n`.
-pub fn pretty_with(x: &[f64], n: i32) -> Pretty {
+fn pretty_with(x: &[f64], n: i32) -> Pretty {
     let finite: Vec<f64> = x.iter().copied().filter(|v| v.is_finite()).collect();
     if finite.is_empty() {
         return Pretty {

@@ -128,6 +128,7 @@ impl PanelWriter {
     }
 
     /// Rectangle with an outline.
+    #[allow(clippy::too_many_arguments)]
     pub fn rect_stroked(
         &mut self,
         x: f64,
@@ -252,10 +253,6 @@ impl YAxis {
         self.plot_bottom - fraction * (self.plot_bottom - self.plot_top)
     }
 
-    /// Height of the data area.
-    pub fn plot_height(&self) -> f64 {
-        (self.plot_bottom - self.plot_top).max(0.0)
-    }
 }
 
 /// Formats a genomic coordinate the way `track_plot()` does: megabases and
@@ -334,6 +331,7 @@ fn round_two(value: f64) -> f64 {
 ///
 /// When `show_axis` is false the y range is annotated as `[min-max]` in the top
 /// left corner, which is what `track_plot()` does instead of axis ticks.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_signal_panel(
     panel: &mut PanelWriter,
     track: &SampleTrack,
@@ -743,7 +741,6 @@ mod tests {
         assert_eq!(axis.map(25.0), 50.0);
         // Values beyond the axis are clamped, never drawn outside the panel.
         assert_eq!(axis.map(200.0), 0.0);
-        assert_eq!(axis.plot_height(), 100.0);
     }
 
     #[test]
