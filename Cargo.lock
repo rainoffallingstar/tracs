@@ -315,6 +315,8 @@ dependencies = [
 [[package]]
 name = "derive_utils"
 version = "0.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "362f47930db19fe7735f527e6595e4900316b893ebf6d48ad3d31be928d57dd6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -711,6 +713,8 @@ dependencies = [
 [[package]]
 name = "io-enum"
 version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7de9008599afe8527a8c9d70423437363b321649161e98473f433de802d76107"
 dependencies = [
  "derive_utils",
 ]
