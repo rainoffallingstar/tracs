@@ -21,6 +21,33 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Set up R (for end-to-end plotting)
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "release"
+          use-public-rspm: true
+
+      - name: Install R dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          # track_plot() only needs base graphics plus data.table. Installing it
+          # up front also stops trackplot.R from trying to install it at
+          # `source()` time.
+          Rscript -e 'install.packages(c("data.table"), repos = "https://cloud.r-project.org")'
+          Rscript -e 'stopifnot(requireNamespace("data.table", quietly = TRUE))'
+          # org.Hs.eg.db backs the local symbol -> Ensembl lookup used by the
+          # gene-mode end-to-end test, keeping it offline and deterministic.
+          Rscript -e 'install.packages("BiocManager", repos = "https://cloud.r-project.org")'
+          Rscript -e 'BiocManager::install("org.Hs.eg.db", ask = FALSE, update = FALSE)'
+          Rscript -e 'stopifnot(requireNamespace("org.Hs.eg.db", quietly = TRUE))'
+          # `tracs` only probes a few hardcoded R library paths, but setup-r
+          # installs into a versioned prefix, so point it at the real sqlite.
+          ORGDB="$(Rscript -e 'cat(system.file("extdata", "org.Hs.eg.sqlite", package = "org.Hs.eg.db"))')"
+          test -f "$ORGDB"
+          echo "TRACKTOOLS_ORGDB_SQLITE=$ORGDB" >> "$GITHUB_ENV"
+          echo "using orgdb sqlite: $ORGDB"
+
       - name: Set up micromamba (bwtool)
         uses: mamba-org/setup-micromamba@v2
         with:
@@ -53,13 +80,36 @@ jobs:
           done
           ls -la "localdata/data/${SERIES}_RAW" | head
 
-      - name: Run tests (incl. bwtool alignment)
+      - name: Download full hg19 GTF (for gene-mode end-to-end test)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The end-to-end plot test resolves genes against a full annotation,
+          # the same way real usage does, instead of the trimmed testdata/ fixture.
+          URL="https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/genes/hg19.ensGene.gtf.gz"
+          curl -L --retry 5 --retry-delay 2 -o /tmp/hg19.ensGene.gtf.gz "$URL"
+          gunzip -f /tmp/hg19.ensGene.gtf.gz
+          mv /tmp/hg19.ensGene.gtf localdata/data/hg19.ensGene.gtf
+          ls -la localdata/data/hg19.ensGene.gtf
+
+      - name: Run tests (incl. bwtool alignment + plot end-to-end)
         env:
           TRACKTOOLS_TEST_BWTOOL_ENV: tracktools-bwtool
           TRACKTOOLS_GENE_LOOKUP: online
           TRACKTOOLS_TEST_ENABLE_GENE: "1"
+          TRACKTOOLS_TEST_KEEP_WORKDIR: "1"
           XDG_CACHE_HOME: /tmp/tracktools-xdg-cache
         run: cargo test --locked
+
+      - name: Upload end-to-end plot artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-plot-artifacts
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            /tmp/tracs_e2e_*/**
 
   release:
     needs: test

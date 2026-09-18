@@ -1,6 +1,6 @@
 # tracs
 
-`trackplot-rs` 的命令行工具：用 Rust 原生实现 `trackplot.R` 画图前所需的 bigWig 取值与整理流程（并兼容替代 `bwtool` 的 `summary/matrix` 子命令）。R 只负责最终出图。
+`tracs`（原 `trackplot-rs`）是用 Rust 原生实现 `trackplot.R` 画图前所需的 bigWig 取值与整理流程的命令行工具（并兼容替代 `bwtool` 的 `summary/matrix` 子命令）。R 只负责最终出图。
 
 核心能力：
 - `summary`：兼容 `bwtool summary -with-sum -keep-bed -header <bed> <bigwig> <out>`
@@ -13,7 +13,7 @@
 本环境里 `~/.cargo/config` 把 `crates-io` 替换到了 `rsproxy.cn`，可能无法解析域名。建议用独立的 `CARGO_HOME`：
 
 ```bash
-cd .
+cd tracs
 CARGO_HOME=/tmp/cargo-home CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse cargo build --release
 ```
 
@@ -30,7 +30,7 @@ CARGO_HOME=/tmp/cargo-home CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse cargo buil
 ## 测试（自动化对齐检查）
 
 ```bash
-cd .
+cd tracs
 CARGO_HOME=/tmp/cargo-home CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse cargo test
 ```
 
@@ -40,6 +40,30 @@ CARGO_HOME=/tmp/cargo-home CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse cargo test
 - 如果系统里额外安装了 `bwtool`（PATH 可找到），测试会再跑一遍 `bwtool summary/matrix` 并逐列对比，作为“旧 bwtool 路径”的对齐校验；没安装则自动跳过该对比用例。
 - 如果 `bwtool` 只在 mamba 环境里，可通过设置 `TRACKTOOLS_TEST_BWTOOL_ENV=<env>` 让测试用 `micromamba run -n <env> bwtool ...`（优先）或 `conda run -n <env> bwtool ...` 来完成对齐对比（取决于系统里可用的 runner）。
 - 如果你的 micromamba root prefix 不在默认位置，额外设置 `TRACKTOOLS_TEST_MICROMAMBA_ROOT=<root>`（等价于传 `micromamba run -r <root> ...`）。
+
+### 端到端出图测试（`tests/e2e_plot.rs`）
+
+`tests/e2e_plot.rs` 会用真实 bigWig 跑完整的 `tracs plot` 链路（`track-extract` → `Rscript trackplot.R` → PDF），覆盖：
+
+- 多样本 `--coldata` + `--loci` 出图，并校验 `tracks.tsv` 的 bin 数、样本名与信号非零；
+- `--gene`（ENSG）+ **完整** hg19 `ensGene` GTF 出图，校验解析到的染色体/起止/链向与 exon 模型；
+- `--gene`（symbol）经 `org.Hs.eg.db` 本地映射到 ENSG 后出图。
+
+依赖与跳过策略（缺任一项即打印说明并跳过，不会让 `cargo test` 失败）：
+
+- 系统 `PATH` 里有 `Rscript`，且安装了 `data.table`；
+- `localdata/data/hg19.ensGene.gtf`（完整注释，可用 `TRACKTOOLS_TEST_GTF` 覆盖）；
+- symbol 模式还需要本地 orgdb；`TRACKTOOLS_ORGDB_SQLITE` 或 `TRACKTOOLS_GENE_LOOKUP=online` 二者其一。
+
+完整 GTF 可从 UCSC 获取（CI 用同一下载源）：
+
+```bash
+curl -L -o /tmp/hg19.ensGene.gtf.gz \
+  https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/genes/hg19.ensGene.gtf.gz
+gunzip -f /tmp/hg19.ensGene.gtf.gz && mv /tmp/hg19.ensGene.gtf localdata/data/
+```
+
+CI 里会把渲染出的 PDF 与中间 TSV 作为 `e2e-plot-artifacts` 上传，便于失败时排查；本地可设 `TRACKTOOLS_TEST_KEEP_WORKDIR=1` 保留临时工作目录。
 
 准备 `bwtool`（可选，仅用于对齐测试）：
 
@@ -52,7 +76,7 @@ micromamba create -y -r /tmp/tracktools-mamba -n tracktools-bwtool \
 运行对齐测试：
 
 ```bash
-cd .
+cd tracs
 TRACKTOOLS_TEST_BWTOOL_ENV=tracktools-bwtool TRACKTOOLS_TEST_MICROMAMBA_ROOT=/tmp/tracktools-mamba \
   CARGO_HOME=/tmp/cargo-home CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse cargo test
 ```

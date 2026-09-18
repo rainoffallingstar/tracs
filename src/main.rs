@@ -1647,6 +1647,13 @@ fn parse_gtf_for_gene(gtf: &PathBuf, gene_query: &str) -> Result<GeneModels> {
         let strand = cols[6];
         let info = cols[8];
 
+        // `gene_name` and `gene_id` are both parsed out of `info`, so a line can
+        // only match when `info` contains the query. Checking that first avoids
+        // allocating an attribute map for every line of a full-genome GTF.
+        if !info.contains(gene_query) {
+            continue;
+        }
+
         let attrs = parse_gtf_attrs(info);
         let gene_name = attrs
             .get("gene_name")
