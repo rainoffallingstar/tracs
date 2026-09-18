@@ -21,7 +21,7 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Set up R (for end-to-end plotting)
+      - name: Set up R (only for the org.Hs.eg.db symbol lookup)
         uses: r-lib/actions/setup-r@v2
         with:
           r-version: "release"
@@ -31,13 +31,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # track_plot() only needs base graphics plus data.table. Installing it
-          # up front also stops trackplot.R from trying to install it at
-          # `source()` time.
-          Rscript -e 'install.packages(c("data.table"), repos = "https://cloud.r-project.org")'
-          Rscript -e 'stopifnot(requireNamespace("data.table", quietly = TRUE))'
-          # org.Hs.eg.db backs the local symbol -> Ensembl lookup used by the
-          # gene-mode end-to-end test, keeping it offline and deterministic.
+          # R is no longer needed to render plots -- that is native Rust now.
+          # It is still used to provide org.Hs.eg.db, whose sqlite backs the
+          # local symbol -> Ensembl lookup exercised by the gene-mode e2e test.
           Rscript -e 'install.packages("BiocManager", repos = "https://cloud.r-project.org")'
           Rscript -e 'BiocManager::install("org.Hs.eg.db", ask = FALSE, update = FALSE)'
           Rscript -e 'stopifnot(requireNamespace("org.Hs.eg.db", quietly = TRUE))'

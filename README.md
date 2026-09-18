@@ -1,12 +1,16 @@
 # tracs
 
-`tracs`（原 `trackplot-rs`）是用 Rust 原生实现 `trackplot.R` 画图前所需的 bigWig 取值与整理流程的命令行工具（并兼容替代 `bwtool` 的 `summary/matrix` 子命令）。R 只负责最终出图。
+`tracs`（原 `trackplot-rs`）是用 Rust 原生实现 bigWig 取值、整理与**出图**的命令行工具（并兼容替代 `bwtool` 的 `summary/matrix` 子命令）。不依赖 R 或显示服务器。
 
 核心能力：
 - `summary`：兼容 `bwtool summary -with-sum -keep-bed -header <bed> <bigwig> <out>`
 - `matrix`：兼容 `bwtool matrix -starts/-ends -tiled-averages=<bin> <up:down> <bed> <bigwig> <out>`
 - `track-extract`：更高层的一次性提取（多 bigWig + loci/gene + binsize + 可选 gene 模型/ideogram），供 `trackplot.R` 直接消费
-- `plot-track`（别名 `plot`）：Rust 主程序一键调用 `track-extract` + `Rscript trackplot.R` 输出 PDF（默认自动分配配色）
+- `plot-track`（别名 `plot`）：`track-extract` + **Rust 原生渲染**输出 PDF/SVG（无需 R；默认自动分配配色）
+
+> **绘图层已完全 Rust 化。** 早期版本通过 `Rscript trackplot.R` 出图；现在布局、绘图、PDF 生成都在 Rust 内完成（`src/plot/`），`tracs plot` 不再需要 R、X11 或显示服务器。
+> 输出格式由 `--out` 的扩展名决定（`.pdf` 或 `.svg`）。
+> `trackplot.R` 仍保留在仓库中，供 R 侧集成（`TRACKTOOLS_TRACKPREP_CMD`）使用，但已不在 `tracs plot` 的调用链上。
 
 ## 构建
 
@@ -43,7 +47,7 @@ CARGO_HOME=/tmp/cargo-home CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse cargo test
 
 ### 端到端出图测试（`tests/e2e_plot.rs`）
 
-`tests/e2e_plot.rs` 会用真实 bigWig 跑完整的 `tracs plot` 链路（`track-extract` → `Rscript trackplot.R` → PDF），覆盖：
+`tests/e2e_plot.rs` 会用真实 bigWig 跑完整的 `tracs plot` 链路（`track-extract` → Rust 原生渲染 → PDF），覆盖：
 
 - 多样本 `--coldata` + `--loci` 出图，并校验 `tracks.tsv` 的 bin 数、样本名与信号非零；
 - `--gene`（ENSG）+ **完整** hg19 `ensGene` GTF 出图，校验解析到的染色体/起止/链向与 exon 模型；
@@ -51,7 +55,6 @@ CARGO_HOME=/tmp/cargo-home CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse cargo test
 
 依赖与跳过策略（缺任一项即打印说明并跳过，不会让 `cargo test` 失败）：
 
-- 系统 `PATH` 里有 `Rscript`，且安装了 `data.table`；
 - `localdata/data/hg19.ensGene.gtf`（完整注释，可用 `TRACKTOOLS_TEST_GTF` 覆盖）；
 - symbol 模式还需要本地 orgdb；`TRACKTOOLS_ORGDB_SQLITE` 或 `TRACKTOOLS_GENE_LOOKUP=online` 二者其一。
 
@@ -126,7 +129,6 @@ Sys.setenv(TRACKTOOLS_TRACKPREP_CMD = "./target/release/tracs")
 
 ```bash
 ./target/release/tracs plot \
-  --trackplot-r trackplot.R \
   --out out.pdf \
   --gene SLC19A1 --build hg19 --binsize 200 \
   --bigwig localdata/data/GSE199964_RAW/H3K27ac_1.bigWig --sample H3K27ac_1
