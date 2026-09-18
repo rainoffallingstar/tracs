@@ -288,6 +288,48 @@ pub fn format_tick(value: f64) -> String {
     trim_number(value)
 }
 
+/// Formats the two y-axis endpoint labels with a shared number of decimals.
+///
+/// R's `axis(at = c(min, max))` feeds both values through one `format()` call,
+/// which derives a *single* precision from the pair. So `c(0, 109.76)` prints as
+/// `"0.00"` and `"109.76"` (not `"0"`), while `c(0, 1)` prints as `"0"`/`"1"`.
+/// Each value is first rounded to two decimals, as `track_plot()` does.
+pub fn format_axis_pair(min: f64, max: f64) -> [String; 2] {
+    let min = round_two(min);
+    let max = round_two(max);
+
+    // R drops trailing zeros only when every value in the vector is integral.
+    let decimals = if min.fract() == 0.0 && max.fract() == 0.0 {
+        0
+    } else {
+        // Otherwise use the smallest precision that represents both exactly,
+        // capped at two (the values are already rounded to 2dp).
+        let needed = |value: f64| -> usize {
+            for precision in 1..=2 {
+                let factor = 10f64.powi(precision as i32);
+                if (value * factor).round() / factor == value {
+                    return precision;
+                }
+            }
+            2
+        };
+        needed(min).max(needed(max))
+    };
+
+    match decimals {
+        0 => [format!("{}", min as i64), format!("{}", max as i64)],
+        precision => [
+            format!("{min:.precision$}"),
+            format!("{max:.precision$}"),
+        ],
+    }
+}
+
+/// Rounds to two decimals, matching `track_plot()`'s `round(x, digits = 2)`.
+fn round_two(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
+}
+
 /// Draws a bigWig signal panel: one filled bar per bin, scaled to `y_max`.
 ///
 /// When `show_axis` is false the y range is annotated as `[min-max]` in the top
@@ -329,17 +371,33 @@ pub fn draw_signal_panel(
     );
 
     if show_axis {
-        let ticks = pretty::pretty_range(0.0, y_axis.y_max, 5);
-        for tick in &ticks.values {
-            if *tick < 0.0 || *tick > y_axis.y_max {
-                continue;
-            }
-            let y = y_axis.map(*tick);
+        // `track_plot()` labels only the two endpoints:
+        //   axis(side = 2, at = c(plot_height_min[idx], plot_height[idx]), las = 2)
+        // Using pretty() ticks here would add intermediate gridlines that R
+        // does not draw, so the axis would read differently.
+        //
+        // R's `axis()` also strokes the axis line itself, which is why the two
+        // labels appear joined by a vertical rule.
+        panel.line(
+            x_axis.plot_left,
+            y_axis.plot_top,
+            x_axis.plot_left,
+            y_axis.plot_bottom,
+            "black",
+            1.0,
+        );
+
+        // R formats the pair with a *shared* number of decimals (so `c(0, 109.76)`
+        // prints as "0.00" and "109.76"), which is why both labels are built
+        // together rather than independently.
+        let labels = format_axis_pair(0.0, y_axis.y_max);
+        for (value, label) in [0.0, y_axis.y_max].into_iter().zip(labels) {
+            let y = y_axis.map(value);
             panel.line(x_axis.plot_left - 4.0, y, x_axis.plot_left, y, "black", 1.0);
             panel.text(
                 x_axis.plot_left - 6.0,
-                y + 3.0,
-                &format_tick(*tick),
+                y + font_size * 0.35,
+                &label,
                 font_size,
                 "end",
                 "black",
@@ -650,6 +708,7 @@ pub fn resolve_colors(requested: &[String], count: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plot::io::SignalBin;
 
     #[test]
     fn escapes_xml_metacharacters() {
@@ -696,6 +755,82 @@ mod tests {
         // Plain below the thresholds
         assert_eq!(format_coordinate(12_345.0), "12345");
         assert_eq!(format_coordinate(0.0), "0");
+    }
+
+    #[test]
+    fn axis_pair_uses_shared_precision_like_r() {
+        // Expectations captured from R 4.6.0:
+        //   round(p, 2) |> format()
+        // R derives ONE precision for the pair, so a trailing ".00" appears on
+        // the minimum when the maximum needs two decimals.
+        let cases: &[(f64, f64, [&str; 2])] = &[
+            (0.0, 109.76, ["0.00", "109.76"]),
+            (0.5, 12.0, ["0.5", "12.0"]),
+            (-3.2, 7.4, ["-3.2", "7.4"]),
+            (0.0, 1.0, ["0", "1"]),
+            (0.0, 8.8, ["0.0", "8.8"]),
+            (1.5, 2.25, ["1.50", "2.25"]),
+            (0.0, 0.0, ["0", "0"]),
+        ];
+        for (min, max, expected) in cases {
+            let got = format_axis_pair(*min, *max);
+            assert_eq!(
+                &got, expected,
+                "axis pair for ({min}, {max}) should match R's format()"
+            );
+        }
+    }
+
+    #[test]
+    fn signal_axis_labels_both_endpoints_only() {
+        // R draws `axis(side = 2, at = c(min, max))`: exactly two labels, not
+        // pretty() ticks. The rendered panel must therefore contain the max
+        // value once and no intermediate tick labels.
+        let track = SampleTrack {
+            sample: "s1".to_string(),
+            bins: (0..5)
+                .map(|index| SignalBin {
+                    chromosome: "chr1".to_string(),
+                    start: 1000 + index * 100,
+                    end: 1100 + index * 100,
+                    size: 100,
+                    max: 20.0,
+                })
+                .collect(),
+        };
+        let mut writer = SvgWriter::new(400.0, 120.0);
+        writer.panel(0.0, 0.0, 400.0, 120.0, |panel| {
+            draw_signal_panel(
+                panel,
+                &track,
+                XAxis {
+                    plot_left: 50.0,
+                    plot_right: 390.0,
+                    data_start: 1000.0,
+                    data_end: 1500.0,
+                },
+                YAxis {
+                    plot_top: 10.0,
+                    plot_bottom: 110.0,
+                    y_max: 20.0,
+                },
+                "#000000",
+                true,
+                "s1",
+                false,
+                10.0,
+            );
+        });
+        let svg = writer.finish();
+
+        // Endpoint labels present.
+        assert!(svg.contains(">20</text>"), "max label missing: {svg}");
+        assert!(svg.contains(">0</text>"), "min label missing");
+        // No intermediate pretty() tick from the 0..20 range.
+        assert!(
+            !svg.contains(">5</text>") && !svg.contains(">10</text>") && !svg.contains(">15</text>"),
+            "intermediate tick labels should not be drawn"
+        );
     }
 
     #[test]

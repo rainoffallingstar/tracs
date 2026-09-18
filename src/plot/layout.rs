@@ -47,6 +47,28 @@ impl TrackKind {
         }
     }
 
+    /// Margins in R's `par(mar=)` units (lines), as `[top, right, bottom, left]`.
+    ///
+    /// `track_plot()` sets different margins per track type; at R's default 0.2in
+    /// line height one unit is 14.4pt. The `left` entry is a placeholder because
+    /// the real value comes from `left_mar`.
+    pub fn margins_lines(self) -> [f64; 4] {
+        match self {
+            // peaks: mar = c(0.25, left_mar, 0.25, 1)
+            TrackKind::Peaks => [0.25, 1.0, 0.25, 2.0],
+            // bigWig: mar = c(0.5, left_mar, 2, 1)
+            TrackKind::BigWig => [0.5, 1.0, 2.0, 2.0],
+            // chromHMM: mar = c(0.1, left_mar, 0, 1)
+            TrackKind::ChromHmm => [0.1, 1.0, 0.0, 2.0],
+            // gene: mar = c(0.25, left_mar, 0, 1)
+            TrackKind::Gene => [0.25, 1.0, 0.0, 2.0],
+            // scale: mar = c(0, left_mar, 0, 1)
+            TrackKind::Scale => [0.0, 1.0, 0.0, 2.0],
+            // ideogram: mar = c(0.2, 1, 0, 1) -- its left is a literal 1
+            TrackKind::Cytoband => [0.2, 1.0, 0.0, 1.0],
+        }
+    }
+
     /// Parses a `layout_ord` letter. Unknown letters are ignored, as in R.
     pub fn from_key(key: char) -> Option<Self> {
         match key {

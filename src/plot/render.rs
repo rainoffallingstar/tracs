@@ -17,6 +17,12 @@ use crate::plot::svg::{
     draw_signal_panel, SvgWriter, XAxis, YAxis,
 };
 
+/// One `par(mar=)` unit in points.
+///
+/// R's default `cin` is `c(0.15, 0.2)` inches, so one margin line is 0.2in =
+/// 14.4pt at the 72dpi the renderer works in.
+const R_LINE_HEIGHT: f64 = 14.4;
+
 /// Output format for the renderer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutputFormat {
@@ -262,16 +268,22 @@ pub fn render_svg(inputs: &RenderInputs, options: &RenderOptions) -> Result<Stri
             data_end: inputs.region.end as f64,
         };
 
+        // `track_plot()` sets per-track `par(mar=)`; reproducing those keeps the
+        // data area proportions close to R's rather than using one shared inset.
+        let margins = panel.kind.margins_lines();
+        let top_inset = margins[0] * R_LINE_HEIGHT;
+        let bottom_inset = margins[2] * R_LINE_HEIGHT;
+        let _ = margins[1];
+
         writer.panel(0.0, panel_top, options.width, panel_height, |draw| {
-            // Every panel reserves the same title space, then uses what remains
-            // for its data area. This keeps baselines aligned across tracks.
+            // Track titles sit in the top inset; the data area uses the rest.
             let title_space = if options.track_names_to_left {
-                0.0
+                top_inset
             } else {
-                options.panel_title_space
+                top_inset.max(options.panel_title_space)
             };
             let plot_top = title_space;
-            let plot_bottom = (panel_height - 2.0).max(plot_top + 1.0);
+            let plot_bottom = (panel_height - bottom_inset).max(plot_top + 1.0);
 
             match panel.kind {
                 TrackKind::BigWig => {
