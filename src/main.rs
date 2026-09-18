@@ -19,6 +19,17 @@ use serde_json::Value as JsonValue;
 
 mod plot;
 
+/// Base font size for track labels, in points.
+///
+/// R's `track_plot()` uses base graphics defaults with `cex` scaling; this is
+/// the equivalent flat size for the native renderer.
+const DEFAULT_FONT_SIZE: f64 = 10.0;
+
+/// Default left margin for panels, leaving room for y-axis labels and track
+/// names. `track_plot()` uses `4` or `2` lines depending on `show_axis`; at the
+/// default font size one line is roughly 12pt, giving ~48 or ~24pt.
+const DEFAULT_LEFT_MARGIN: f64 = 48.0;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "tracs",
@@ -38,7 +49,7 @@ enum Command {
     Matrix(MatrixArgs),
     /// Extract binned max signal tracks for a locus/gene across multiple bigWigs.
     TrackExtract(TrackExtractArgs),
-    /// Run `track-extract` then call R to plot tracks into a PDF.
+    /// Run `track-extract` then render tracks natively into a PDF.
     #[command(alias = "plot")]
     PlotTrack(PlotTrackArgs),
 }
@@ -150,17 +161,9 @@ struct TrackExtractArgs {
 
 #[derive(Parser, Debug)]
 struct PlotTrackArgs {
-    /// Path to `trackplot.R` (this repository file).
-    #[arg(long = "trackplot-r", default_value = "trackplot.R")]
-    trackplot_r: PathBuf,
-
     /// Output PDF path.
     #[arg(long = "out")]
     out_pdf: PathBuf,
-
-    /// Path to `Rscript` (defaults to `Rscript` in PATH).
-    #[arg(long = "rscript", default_value = "Rscript")]
-    rscript: String,
 
     /// Output working directory for intermediate TSVs (optional). If not provided, a temp dir is created.
     #[arg(long = "work-dir")]
@@ -810,9 +813,6 @@ fn cmd_plot_track(args: PlotTrackArgs) -> Result<()> {
         None => create_temp_workdir("tracktools_plot_")?,
     };
 
-    let trackplot_r = fs::canonicalize(&args.trackplot_r)
-        .with_context(|| format!("trackplot-r not found: {:?}", args.trackplot_r))?;
-
     let (bigwigs, sample_names) = if let Some(coldata_path) = args.coldata.as_ref() {
         read_coldata_tsv(coldata_path).with_context(|| format!("read coldata: {:?}", coldata_path))?
     } else {
@@ -934,7 +934,7 @@ fn cmd_plot_track(args: PlotTrackArgs) -> Result<()> {
     kv.push(("draw_gene_track".to_string(), bool_to_r(args.draw_gene_track)));
     kv.push(("track_overlay".to_string(), bool_to_r(args.track_overlay)));
     kv.push(("collapse_txs".to_string(), bool_to_r(args.collapse_txs)));
-    kv.push(("col".to_string(), resolved_cols));
+    kv.push(("col".to_string(), resolved_cols.clone()));
     kv.push((
         "group_auto_scale".to_string(),
         bool_to_r(args.group_auto_scale),
@@ -1006,224 +1006,60 @@ fn cmd_plot_track(args: PlotTrackArgs) -> Result<()> {
     ));
     write_kv_tsv(&plot_params_path, &kv)?;
 
-    // 4) Write a small R script that constructs summary_list and calls track_plot()
-    let r_script_path = work_dir.join("plot_track.R");
-    fs::write(
-        &r_script_path,
-        r##"
-args <- commandArgs(trailingOnly = TRUE)
-trackplot_r <- args[[1]]
-work_dir <- args[[2]]
-out_pdf <- args[[3]]
-pdf_w <- as.numeric(args[[4]])
-pdf_h <- as.numeric(args[[5]])
+    // 4) Render natively (no Rscript): compose SVG then convert to PDF/SVG.
+    let render_options = plot::render::RenderOptions {
+        width: args.pdf_width * 72.0,
+        height: args.pdf_height * 72.0,
+        colors: split_csv(&resolved_cols),
+        show_axis: args.show_axis,
+        show_ideogram: args.show_ideogram,
+        draw_gene_track: args.draw_gene_track,
+        track_names_to_left: args.track_names_to_left,
+        track_names: args.track_names.as_ref().map(|names| split_csv(names)),
+        font_size: DEFAULT_FONT_SIZE,
+        bigwig_height: args.bw_track_height,
+        peaks_height: args.peaks_track_height,
+        gene_height: args.gene_track_height,
+        scale_height: args.scale_track_height,
+        chromhmm_height: args.chromhmm_track_height,
+        cytoband_height: args.cytoband_track_height,
+        y_max: args.y_max.as_ref().map(|values| {
+            split_csv(values)
+                .iter()
+                .filter_map(|value| value.trim().parse::<f64>().ok())
+                .collect()
+        }),
+        group_auto_scale: args.group_auto_scale,
+        layout_ord: split_csv(&args.layout_ord)
+            .iter()
+            .filter_map(|key| key.trim().chars().next())
+            .filter_map(plot::layout::TrackKind::from_key)
+            .collect(),
+        left_margin: args.left_mar.unwrap_or(DEFAULT_LEFT_MARGIN),
+        peaks: peaks_abs
+            .iter()
+            .enumerate()
+            .map(|(index, path)| {
+                let name = args
+                    .peaks_track_names
+                    .as_ref()
+                    .map(|names| split_csv(names))
+                    .and_then(|names| names.get(index).cloned())
+                    .unwrap_or_else(|| {
+                        path.file_name()
+                            .and_then(|value| value.to_str())
+                            .unwrap_or("peaks")
+                            .to_string()
+                    });
+                let regions = plot::io::read_regions(path).unwrap_or_default();
+                (name, regions)
+            })
+            .collect(),
+        ..plot::render::RenderOptions::default()
+    };
 
-suppressPackageStartupMessages(library(data.table))
-source(trackplot_r)
-
-params <- fread(file.path(work_dir, "plot_params.tsv"))
-if (!all(c("key","value") %in% colnames(params)) && ncol(params) >= 2) {
-  colnames(params)[1:2] <- c("key","value")
-}
-get_param <- function(k, default = "") {
-  v <- params[key %in% k, value]
-  if (length(v) < 1 || is.na(v[1]) || !nzchar(v[1])) return(default)
-  v[1]
-}
-get_bool <- function(k, default = FALSE) {
-  v <- tolower(get_param(k, ifelse(default, "true", "false")))
-  v %in% c("true", "t", "1", "yes", "y")
-}
-get_num <- function(k, default = NA_real_) {
-  v <- get_param(k, "")
-  if (!nzchar(v)) return(default)
-  as.numeric(v)
-}
-get_csv <- function(k) {
-  v <- get_param(k, "")
-  if (!nzchar(v)) return(NULL)
-  strsplit(v, ",", fixed = TRUE)[[1]]
-}
-get_csv_num <- function(k) {
-  v <- get_csv(k)
-  if (is.null(v)) return(NULL)
-  as.numeric(v)
-}
-get_named_vec <- function(k) {
-  v <- get_csv(k)
-  if (is.null(v)) return(NULL)
-  kv <- strsplit(v, "=", fixed = TRUE)
-  keys <- vapply(kv, function(x) ifelse(length(x) >= 1, x[[1]], ""), character(1))
-  vals <- vapply(kv, function(x) ifelse(length(x) >= 2, x[[2]], ""), character(1))
-  ok <- nzchar(keys) & nzchar(vals)
-  vals <- vals[ok]
-  keys <- keys[ok]
-  if (length(keys) == 0) return(NULL)
-  names(vals) <- keys
-  vals
-}
-
-ref_build <- get_param("ref_build", "hg19")
-show_ideogram <- get_bool("show_ideogram", TRUE)
-draw_gene_track <- get_bool("draw_gene_track", TRUE)
-track_overlay <- get_bool("track_overlay", FALSE)
-collapse_txs <- get_bool("collapse_txs", TRUE)
-col_arg <- get_param("col", "gray70")
-group_auto_scale <- get_bool("group_auto_scale", FALSE)
-y_max_arg <- get_param("y_max", "")
-y_min_arg <- get_param("y_min", "")
-txname_arg <- get_param("txname", "")
-genename_arg <- get_param("genename", "")
-show_axis <- get_bool("show_axis", FALSE)
-track_names_arg <- get_param("track_names", "")
-track_names_pos <- get_num("track_names_pos", 0)
-track_names_to_left <- get_bool("track_names_to_left", FALSE)
-gene_fsize <- get_num("gene_fsize", 1)
-bw_ord_arg <- get_param("bw_ord", "")
-layout_ord_arg <- get_param("layout_ord", "p,b,h,g,c")
-regions_bed <- get_param("regions_bed", "")
-bw_track_height <- get_num("bw_track_height", 3)
-peaks_track_height <- get_num("peaks_track_height", 2)
-gene_track_height <- get_num("gene_track_height", 2)
-scale_track_height <- get_num("scale_track_height", 2)
-chromhmm_track_height <- get_num("chromhmm_track_height", 1)
-cytoband_track_height <- get_num("cytoband_track_height", 2)
-left_mar <- get_num("left_mar", NA_real_)
-boxcol <- get_param("boxcol", "#ffc41a")
-boxcolalpha <- get_num("boxcolalpha", 0.4)
-peaks_arg <- get_param("peaks", "")
-peaks_track_names_arg <- get_param("peaks_track_names", "")
-chromhmm_arg <- get_param("chromhmm", "")
-chromhmm_names_arg <- get_param("chromhmm_names", "")
-chromhmm_cols_arg <- get_param("chromhmm_cols", "")
-
-meta <- fread(file.path(work_dir, "meta.tsv"))
-if (!all(c("key","value") %in% colnames(meta)) && ncol(meta) >= 2) {
-  colnames(meta)[1:2] <- c("key","value")
-}
-loci <- meta[key %in% "loci", value][1]
-
-tracks <- fread(file.path(work_dir, "tracks.tsv"))
-coldata <- fread(file.path(work_dir, "coldata.tsv"))
-setattr(coldata, "is_bw", TRUE)
-setattr(coldata, "refbuild", ref_build)
-
-track_summary <- lapply(coldata$bw_sample_names, function(nm) {
-  tracks[sample %in% nm, .(chromosome, start, end, size, max)]
-})
-names(track_summary) <- coldata$bw_sample_names
-
-cyto_path <- file.path(work_dir, "cytoband.tsv")
-if (file.exists(cyto_path)) {
-  cyto <- fread(cyto_path)
-  colnames(cyto)[1:6] <- c("chr","start","end","band","stain","color")
-  setkey(cyto, chr, start, end)
-} else {
-  cyto <- NA
-}
-
-etbl_path <- file.path(work_dir, "gene_models.tsv")
-if (file.exists(etbl_path)) {
-  etbl <- .read_gene_models_tsv(etbl_path)
-} else {
-  etbl <- NULL
-}
-
-attr(track_summary, "meta") <- list(etbl = etbl, cyto = cyto, loci = loci)
-summary_list <- list(data = track_summary, colData = coldata)
-
-parse_csv_char <- function(x){
-  if (is.null(x) || is.na(x) || !nzchar(x)) return(NULL)
-  strsplit(x, ",", fixed = TRUE)[[1]]
-}
-
-cols <- parse_csv_char(col_arg)
-y_max <- get_csv_num("y_max")
-y_min <- get_csv_num("y_min")
-txname <- parse_csv_char(txname_arg)
-genename <- parse_csv_char(genename_arg)
-track_names <- parse_csv_char(track_names_arg)
-bw_ord <- parse_csv_char(bw_ord_arg)
-layout_ord <- parse_csv_char(layout_ord_arg)
-peaks <- parse_csv_char(peaks_arg)
-peaks_track_names <- parse_csv_char(peaks_track_names_arg)
-chromhmm <- parse_csv_char(chromhmm_arg)
-chromhmm_names <- parse_csv_char(chromhmm_names_arg)
-chromhmm_cols <- get_named_vec("chromhmm_cols")
-
-regions <- NULL
-if (!is.null(regions_bed) && !is.na(regions_bed) && nzchar(regions_bed) && file.exists(regions_bed)) {
-  regions <- fread(regions_bed, header = FALSE)
-  if (ncol(regions) >= 3) {
-    regions <- as.data.frame(regions[,1:3])
-  } else {
-    regions <- NULL
-  }
-}
-
-plot_args <- list(
-  summary_list = summary_list,
-  show_ideogram = show_ideogram,
-  draw_gene_track = draw_gene_track,
-  track_overlay = track_overlay,
-  collapse_txs = collapse_txs,
-  groupAutoScale = group_auto_scale,
-  show_axis = show_axis,
-  track_names_pos = track_names_pos,
-  track_names_to_left = track_names_to_left,
-  gene_fsize = gene_fsize,
-  bw_track_height = bw_track_height,
-  peaks_track_height = peaks_track_height,
-  gene_track_height = gene_track_height,
-  scale_track_height = scale_track_height,
-  chromHMM_track_height = chromhmm_track_height,
-  cytoband_track_height = cytoband_track_height,
-  boxcol = boxcol,
-  boxcolalpha = boxcolalpha,
-  layout_ord = layout_ord
-)
-if (!is.null(cols)) plot_args$col <- cols
-if (!is.null(y_max)) plot_args$y_max <- y_max
-if (!is.null(y_min)) plot_args$y_min <- y_min
-if (!is.null(txname)) plot_args$txname <- txname
-if (!is.null(genename)) plot_args$genename <- genename
-if (!is.null(track_names)) plot_args$track_names <- track_names
-if (!is.null(bw_ord)) plot_args$bw_ord <- bw_ord
-if (!is.null(regions)) plot_args$regions <- regions
-if (!is.na(left_mar)) plot_args$left_mar <- left_mar
-if (!is.null(peaks)) plot_args$peaks <- peaks
-if (!is.null(peaks_track_names)) plot_args$peaks_track_names <- peaks_track_names
-if (!is.null(chromhmm)) plot_args$chromHMM <- chromhmm
-if (!is.null(chromhmm_names)) plot_args$chromHMM_names <- chromhmm_names
-if (!is.null(chromhmm_cols)) plot_args$chromHMM_cols <- chromhmm_cols
-
-pdf(out_pdf, width = pdf_w, height = pdf_h)
-tryCatch({
-  do.call(track_plot, plot_args)
-}, finally = {
-  dev.off()
-})
-	"##,
-    )
-    .with_context(|| format!("write R script: {:?}", r_script_path))?;
-
-    // 5) Run Rscript
-    let mut cmd = ProcCommand::new(&args.rscript);
-    cmd.arg(&r_script_path)
-        .arg(trackplot_r)
-        .arg(&work_dir)
-        .arg(&args.out_pdf)
-        .arg(args.pdf_width.to_string())
-        .arg(args.pdf_height.to_string());
-
-    let out = cmd.output().context("running Rscript")?;
-    if !out.status.success() {
-        return Err(anyhow!(
-            "Rscript failed (status {}):\n{}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr)
-        ));
-    }
+    plot::render::render_work_dir(&work_dir, &render_options, &args.out_pdf)
+        .with_context(|| format!("render tracks to {:?}", args.out_pdf))?;
 
     Ok(())
 }

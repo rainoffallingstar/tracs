@@ -1,19 +1,19 @@
 //! End-to-end tests for `tracs plot`: real bigWig data -> `track-extract` ->
-//! `Rscript trackplot.R` -> PDF.
+//! native rendering -> PDF.
 //!
-//! These tests are intentionally skipped (with an explanatory message) when the
-//! required inputs are unavailable, so that `cargo test` stays usable on a
-//! machine without R or without the downloaded GEO fixtures:
+//! Rendering is done entirely in Rust, so these tests need neither R nor a
+//! display server. They are skipped (with an explanatory message) when the
+//! downloaded fixtures are unavailable, so `cargo test` stays usable on a
+//! machine without the GEO data:
 //!
 //! - bigWigs from `GSE199964` under `localdata/data/GSE199964_RAW/`
 //!   (override with `TRACKTOOLS_TESTDATA_DIR`),
 //! - a full hg19 `ensGene` GTF under `localdata/data/hg19.ensGene.gtf`
-//!   (override with `TRACKTOOLS_TEST_GTF`),
-//! - `Rscript` with the `data.table` package on `PATH`.
+//!   (override with `TRACKTOOLS_TEST_GTF`).
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
@@ -102,27 +102,7 @@ fn sorted_bigwigs() -> Vec<PathBuf> {
     found
 }
 
-fn have_rscript() -> bool {
-    Command::new("Rscript")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok()
-}
 
-fn have_data_table() -> bool {
-    Command::new("Rscript")
-        .args([
-            "-e",
-            "quit(status = if (requireNamespace('data.table', quietly = TRUE)) 0 else 1)",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
 
 fn read_tsv(path: &Path) -> Result<Vec<Vec<String>>> {
     let text = fs::read_to_string(path).with_context(|| format!("read: {path:?}"))?;
@@ -150,8 +130,8 @@ fn lookup_kv(rows: &[(String, String)], key: &str) -> Option<String> {
         .map(|(_, v)| v.clone())
 }
 
-/// A PDF always starts with the `%PDF-` magic bytes; anything else means the R
-/// plotting step produced a truncated or empty file.
+/// A PDF always starts with the `%PDF-` magic bytes; anything else means the
+/// renderer produced a truncated or empty file.
 fn assert_valid_pdf(path: &Path) -> Result<()> {
     let bytes = fs::read(path).with_context(|| format!("read pdf: {path:?}"))?;
     if bytes.len() < 5 || &bytes[..5] != b"%PDF-" {
@@ -164,18 +144,10 @@ fn assert_valid_pdf(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Shared precondition check: R plus the GEO bigWigs must both be present.
+/// Shared precondition check: the GEO bigWigs must be present.
 ///
 /// Returns the bigWigs when the test can run, or `None` when it should skip.
 fn plot_prerequisites() -> Option<Vec<PathBuf>> {
-    if !have_rscript() {
-        eprintln!("Rscript not found on PATH; skipping plot end-to-end test.");
-        return None;
-    }
-    if !have_data_table() {
-        eprintln!("R package data.table is not installed; skipping plot end-to-end test.");
-        return None;
-    }
     let bigwigs = sorted_bigwigs();
     if bigwigs.is_empty() {
         eprintln!(
@@ -215,8 +187,6 @@ fn plot_loci_multi_sample_renders_pdf() -> Result<()> {
     let output = Command::new(tracs_exe())
         .args([
             "plot",
-            "--trackplot-r",
-            repo_root().join("trackplot.R").to_str().unwrap(),
             "--out",
             pdf_path.to_str().unwrap(),
             "--loci",
@@ -333,8 +303,6 @@ fn plot_gene_with_full_gtf_renders_pdf() -> Result<()> {
         let output = Command::new(tracs_exe())
             .args([
                 "plot",
-                "--trackplot-r",
-                repo_root().join("trackplot.R").to_str().unwrap(),
                 "--out",
                 pdf_path.to_str().unwrap(),
                 "--gene",
@@ -471,8 +439,6 @@ fn plot_gene_symbol_with_full_gtf_renders_pdf() -> Result<()> {
     let mut command = Command::new(tracs_exe());
     command.args([
         "plot",
-        "--trackplot-r",
-        repo_root().join("trackplot.R").to_str().unwrap(),
         "--out",
         pdf_path.to_str().unwrap(),
         "--gene",
