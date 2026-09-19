@@ -12,7 +12,7 @@
 
 use std::fmt::Write as _;
 
-use crate::plot::io::{Cytoband, SampleTrack, Transcript};
+use crate::plot::io::{ChromHmmTrack, Cytoband, SampleTrack, Transcript};
 use crate::plot::pretty;
 
 /// Colour used for gene model exons and introns (`track_plot()`'s `exon_col`).
@@ -292,6 +292,101 @@ impl YAxis {
     /// the overflow is simply clipped; clamping here reproduces that.
     pub fn baseline(&self) -> f64 {
         self.map(0.0)
+    }
+}
+
+/// Default chromHMM state colours, matching `track_plot()`'s
+/// `.get_ucsc_hmm_states_cols()` (UCSC's 15-state Broad model).
+///
+/// States are keyed by the numeric prefix of the segment name, e.g. the `1` in
+/// `1_Active_Promoter`.
+pub const CHROMHMM_STATE_COLORS: [(&str, &str); 15] = [
+    ("1", "red"),
+    ("2", "red4"),
+    ("3", "purple"),
+    ("4", "orange"),
+    ("5", "orange"),
+    ("6", "yellow"),
+    ("7", "yellow"),
+    ("8", "blue"),
+    ("9", "darkgreen"),
+    ("10", "darkgreen"),
+    ("11", "lightgreen"),
+    ("12", "gray"),
+    ("13", "gray90"),
+    ("14", "gray90"),
+    ("15", "gray90"),
+];
+
+/// Resolves the colour for a chromHMM segment name.
+///
+/// `track_plot()` splits on `_` and takes the first field as the state key, so
+/// `1_Active_Promoter` maps to state `1`. Caller-supplied overrides win.
+pub fn chromhmm_color<'a>(name: &'a str, overrides: &'a [(String, String)]) -> &'a str {
+    let state = name.split('_').next().unwrap_or(name);
+    if let Some((_, color)) = overrides.iter().find(|(key, _)| key == state) {
+        return color;
+    }
+    CHROMHMM_STATE_COLORS
+        .iter()
+        .find(|(key, _)| *key == state)
+        .map(|(_, color)| *color)
+        // R indexes by state name, so an unknown state yields NA and draws
+        // nothing; a neutral grey keeps the segment visible instead.
+        .unwrap_or("gray90")
+}
+
+/// Draws the chromHMM panel: one row per track, each segmented by state.
+///
+/// Ported from `.plot_ucsc_chrHmm()`. Row `i` occupies `i-0.9 ..= i-0.1` in R's
+/// 0..n coordinate space, i.e. the lower 80% of its band, and the track name is
+/// right-aligned outside the data area.
+pub fn draw_chromhmm_panel(
+    panel: &mut PanelWriter,
+    tracks: &[ChromHmmTrack],
+    x_axis: XAxis,
+    font_size: f64,
+    overrides: &[(String, String)],
+) {
+    let count = tracks.len();
+    if count == 0 {
+        return;
+    }
+    let row_height = panel.height() / count as f64;
+
+    for (index, track) in tracks.iter().enumerate() {
+        // R draws rows bottom-up (`i-0.9 .. i-0.1`); index 0 is the top row here
+        // so panels read in the order the caller supplied them.
+        let row_top = row_height * index as f64;
+        let band_top = row_top + row_height * 0.1;
+        let band_height = row_height * 0.8;
+
+        for segment in &track.segments {
+            let left = x_axis.map(segment.start as f64);
+            let right = x_axis.map(segment.end as f64);
+            let color = chromhmm_color(&segment.name, overrides);
+            panel.rect(
+                left,
+                band_top,
+                (right - left).max(0.5),
+                band_height,
+                color,
+            );
+        }
+
+        // R strips the "wgEncodeBroadHmm"/"HMM" affixes from the track label.
+        let label = track
+            .name
+            .replace("wgEncodeBroadHmm", "")
+            .replace("HMM", "");
+        panel.text(
+            x_axis.plot_left - 6.0,
+            row_top + row_height / 2.0 + font_size * 0.35,
+            &label,
+            font_size,
+            "end",
+            "black",
+        );
     }
 }
 
@@ -969,6 +1064,104 @@ mod tests {
             !svg.contains(">5</text>") && !svg.contains(">10</text>") && !svg.contains(">15</text>"),
             "intermediate tick labels should not be drawn"
         );
+    }
+
+    #[test]
+    fn chromhmm_state_colors_follow_r_table() {
+        let none: Vec<(String, String)> = Vec::new();
+        // The 15-state Broad model, keyed by the numeric prefix.
+        assert_eq!(chromhmm_color("1_Active_Promoter", &none), "red");
+        assert_eq!(chromhmm_color("2_Weak_Promoter", &none), "red4");
+        assert_eq!(chromhmm_color("8_Insulator", &none), "blue");
+        assert_eq!(chromhmm_color("11_Weak_Txn", &none), "lightgreen");
+        assert_eq!(chromhmm_color("15_Quiescent", &none), "gray90");
+        // A name with no underscore still resolves through the same lookup.
+        assert_eq!(chromhmm_color("3", &none), "purple");
+    }
+
+    #[test]
+    fn chromhmm_overrides_take_precedence() {
+        let overrides = vec![("1".to_string(), "#123456".to_string())];
+        assert_eq!(chromhmm_color("1_Active_Promoter", &overrides), "#123456");
+        // States without an override fall back to the built-in table.
+        assert_eq!(chromhmm_color("2_Weak_Promoter", &overrides), "red4");
+    }
+
+    #[test]
+    fn chromhmm_panel_draws_one_row_per_track_with_labels() {
+        use crate::plot::io::ChromHmmSegment;
+        let tracks = vec![
+            ChromHmmTrack {
+                name: "wgEncodeBroadHmmGm12878HMM".to_string(),
+                segments: vec![
+                    ChromHmmSegment {
+                        start: 1000,
+                        end: 1200,
+                        name: "1_Active_Promoter".to_string(),
+                    },
+                    ChromHmmSegment {
+                        start: 1200,
+                        end: 1400,
+                        name: "15_Quiescent".to_string(),
+                    },
+                ],
+            },
+            ChromHmmTrack {
+                name: "track2".to_string(),
+                segments: vec![ChromHmmSegment {
+                    start: 1000,
+                    end: 1400,
+                    name: "8_Insulator".to_string(),
+                }],
+            },
+        ];
+
+        let mut writer = SvgWriter::new(400.0, 100.0);
+        writer.panel(0.0, 0.0, 400.0, 100.0, |panel| {
+            draw_chromhmm_panel(
+                panel,
+                &tracks,
+                XAxis {
+                    plot_left: 50.0,
+                    plot_right: 390.0,
+                    data_start: 1000.0,
+                    data_end: 1400.0,
+                },
+                10.0,
+                &[],
+            );
+        });
+        let svg = writer.finish();
+
+        // Two rows, three state segments total.
+        assert_eq!(svg.matches("<rect").count(), 3, "expected one rect per segment");
+        assert!(svg.contains("fill=\"red\""), "state 1 should be red");
+        assert!(svg.contains("fill=\"blue\""), "state 8 should be blue");
+        assert!(svg.contains("fill=\"gray90\""), "state 15 should be gray90");
+        // R strips the wgEncodeBroadHmm/HMM affixes from the track label.
+        assert!(svg.contains(">Gm12878</text>"), "label should be trimmed: {svg}");
+        assert!(!svg.contains("wgEncodeBroadHmm"), "affix should be stripped");
+    }
+
+    #[test]
+    fn empty_chromhmm_panel_draws_nothing() {
+        let mut writer = SvgWriter::new(100.0, 50.0);
+        writer.panel(0.0, 0.0, 100.0, 50.0, |panel| {
+            draw_chromhmm_panel(
+                panel,
+                &[],
+                XAxis {
+                    plot_left: 0.0,
+                    plot_right: 100.0,
+                    data_start: 0.0,
+                    data_end: 100.0,
+                },
+                10.0,
+                &[],
+            );
+        });
+        let svg = writer.finish();
+        assert!(!svg.contains("<rect"), "no tracks should draw no segments");
     }
 
     #[test]

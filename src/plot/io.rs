@@ -89,6 +89,23 @@ pub struct Cytoband {
     pub color: String,
 }
 
+/// One chromHMM segment: a genomic interval with a state name.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChromHmmSegment {
+    pub start: u64,
+    pub end: u64,
+    /// State label as written by UCSC, e.g. `1_Active_Promoter`.
+    pub name: String,
+}
+
+/// One chromHMM track (a single segmentation), ready to draw as a row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChromHmmTrack {
+    /// Display name; R strips the `wgEncodeBroadHmm`/`HMM` affixes at draw time.
+    pub name: String,
+    pub segments: Vec<ChromHmmSegment>,
+}
+
 /// Reads a TSV into rows of fields, skipping blank lines.
 fn read_tsv_rows(path: &Path) -> Result<Vec<Vec<String>>> {
     let text = fs::read_to_string(path).with_context(|| format!("read {path:?}"))?;
@@ -308,6 +325,58 @@ pub fn read_cytobands(path: &Path, chromosome: &str) -> Result<Vec<Cytoband>> {
         });
     }
     Ok(bands)
+}
+
+/// Reads a chromHMM segmentation file (4 columns: chr, start, end, name).
+///
+/// Both the UCSC-derived files written by `tracs plot --ucsc-chromhmm` and
+/// user-supplied BED-like files use this shape. The name column may be
+/// `1_Active_Promoter` (UCSC state encoding) or any free-form label.
+pub fn read_chromhmm(path: &Path, track_name: &str, chromosome: &str) -> Result<ChromHmmTrack> {
+    let text = fs::read_to_string(path).with_context(|| format!("read {path:?}"))?;
+    let mut segments = Vec::new();
+    let mut saw_header = false;
+
+    for (line_number, line) in text.lines().enumerate() {
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() < 4 {
+            return Err(anyhow!(
+                "chromHMM file {path:?} line {} has {} columns, expected 4 (chr, start, end, name)",
+                line_number + 1,
+                fields.len()
+            ));
+        }
+        // The extraction output has no header, but a user-supplied file might.
+        if !saw_header && fields[1].eq_ignore_ascii_case("start") {
+            saw_header = true;
+            continue;
+        }
+        saw_header = true;
+
+        if fields[0] != chromosome {
+            continue;
+        }
+        let start: u64 = fields[1].trim().parse().with_context(|| {
+            format!("chromHMM file {path:?} line {}: bad start {:?}", line_number + 1, fields[1])
+        })?;
+        let end: u64 = fields[2].trim().parse().with_context(|| {
+            format!("chromHMM file {path:?} line {}: bad end {:?}", line_number + 1, fields[2])
+        })?;
+        segments.push(ChromHmmSegment {
+            start,
+            end,
+            name: fields[3].trim().to_string(),
+        });
+    }
+
+    segments.sort_by_key(|segment| segment.start);
+    Ok(ChromHmmTrack {
+        name: track_name.to_string(),
+        segments,
+    })
 }
 
 /// Reads a simple BED-like file into `(start, end)` intervals.

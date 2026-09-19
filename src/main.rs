@@ -1062,6 +1062,40 @@ fn cmd_plot_track(args: PlotTrackArgs) -> Result<()> {
                 (name, regions)
             })
             .collect(),
+        chromhmm: {
+            let names: Vec<String> = args
+                .chromhmm_names
+                .as_ref()
+                .map(|raw| split_csv(raw))
+                .unwrap_or_default();
+            let mut tracks = Vec::new();
+            for (index, path) in chromhmm_paths.iter().enumerate() {
+                // R strips the wgEncodeBroadHmm/HMM affixes from the track name,
+                // so default to the file stem and let the renderer clean it.
+                let name = names.get(index).cloned().unwrap_or_else(|| {
+                    path.file_stem()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("chromHMM")
+                        .to_string()
+                });
+                tracks.push(
+                    plot::io::read_chromhmm(path, &name, &plot_chr)
+                        .with_context(|| format!("read chromHMM track: {path:?}"))?,
+                );
+            }
+            tracks
+        },
+        chromhmm_cols: args
+            .chromhmm_cols
+            .as_ref()
+            .map(|raw| {
+                split_csv(raw)
+                    .iter()
+                    .filter_map(|pair| pair.split_once('='))
+                    .map(|(key, value)| (key.trim().to_string(), value.trim().to_string()))
+                    .collect()
+            })
+            .unwrap_or_default(),
         ..plot::render::RenderOptions::default()
     };
 

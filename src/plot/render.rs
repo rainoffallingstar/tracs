@@ -13,8 +13,8 @@ use crate::plot::fonts;
 use crate::plot::io;
 use crate::plot::layout::{make_layout, LayoutRequest, TrackKind};
 use crate::plot::svg::{
-    self, draw_gene_panel, draw_ideogram_panel, draw_overlay_panel, draw_peaks_panel,
-    draw_scale_panel, draw_signal_panel, SvgWriter, XAxis, YAxis,
+    self, draw_chromhmm_panel, draw_gene_panel, draw_ideogram_panel, draw_overlay_panel,
+    draw_peaks_panel, draw_scale_panel, draw_signal_panel, SvgWriter, XAxis, YAxis,
 };
 
 /// One `par(mar=)` unit in points.
@@ -92,6 +92,10 @@ pub struct RenderOptions {
     pub panel_title_space: f64,
     /// Peaks sets, already loaded as `(name, intervals)`.
     pub peaks: Vec<(String, Vec<(u64, u64)>)>,
+    /// chromHMM tracks, already loaded as one row per segmentation.
+    pub chromhmm: Vec<io::ChromHmmTrack>,
+    /// chromHMM state colour overrides, as `state=color` pairs.
+    pub chromhmm_cols: Vec<(String, String)>,
 }
 
 impl Default for RenderOptions {
@@ -121,6 +125,8 @@ impl Default for RenderOptions {
             right_margin: 12.0,
             panel_title_space: 14.0,
             peaks: Vec::new(),
+            chromhmm: Vec::new(),
+            chromhmm_cols: Vec::new(),
         }
     }
 }
@@ -289,8 +295,7 @@ pub fn render_svg(inputs: &RenderInputs, options: &RenderOptions) -> Result<Stri
             inputs.tracks.len()
         },
         has_peaks: !options.peaks.is_empty(),
-        // chromHMM panels are not produced by track-extract yet.
-        has_chromhmm: false,
+        has_chromhmm: !options.chromhmm.is_empty(),
         has_gene: options.draw_gene_track && !inputs.transcripts.is_empty(),
         has_cytoband: options.show_ideogram && !inputs.cytobands.is_empty(),
         layout_ord: options.layout_ord.clone(),
@@ -451,9 +456,13 @@ pub fn render_svg(inputs: &RenderInputs, options: &RenderOptions) -> Result<Stri
                     draw_peaks_panel(draw, &options.peaks, axis, options.font_size);
                 }
                 TrackKind::ChromHmm => {
-                    // chromHMM tracks are not produced by track-extract yet; the
-                    // layout reserves no space for them (`has_chromhmm` is false),
-                    // so this arm is unreachable in practice.
+                    draw_chromhmm_panel(
+                        draw,
+                        &options.chromhmm,
+                        axis,
+                        options.font_size,
+                        &options.chromhmm_cols,
+                    );
                 }
             }
         });
