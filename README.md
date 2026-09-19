@@ -8,7 +8,7 @@
 - `track-extract`：更高层的一次性提取（多 bigWig + loci/gene + binsize + 可选 gene 模型/ideogram），供 `trackplot.R` 直接消费
 - `plot-track`（别名 `plot`）：`track-extract` + **Rust 原生渲染**输出 PDF/SVG（无需 R；默认自动分配配色）
 
-> **绘图层已完全 Rust 化。** 早期版本通过 `Rscript trackplot.R` 出图；现在布局、绘图、PDF 生成都在 Rust 内完成（`src/plot/`），`tracs plot` 不再需要 R、X11 或显示服务器。
+> **全流程零 R 依赖。** 早期版本通过 `Rscript trackplot.R` 出图；现在布局、绘图、PDF 生成都在 Rust 内完成（`src/plot/`）。构建、测试、CI 都不安装或调用 R，`tracs plot` 也不需要 R、X11 或显示服务器。
 > 输出格式由 `--out` 的扩展名决定（`.pdf` 或 `.svg`）。
 > `trackplot.R` 仍保留在仓库中，供 R 侧集成（`TRACKTOOLS_TRACKPREP_CMD`）使用，但已不在 `tracs plot` 的调用链上。
 
@@ -51,7 +51,7 @@ CARGO_HOME=/tmp/cargo-home CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse cargo test
 
 - 多样本 `--coldata` + `--loci` 出图，并校验 `tracks.tsv` 的 bin 数、样本名与信号非零；
 - `--gene`（ENSG）+ **完整** hg19 `ensGene` GTF 出图，校验解析到的染色体/起止/链向与 exon 模型；
-- `--gene`（symbol）经 `org.Hs.eg.db` 本地映射到 ENSG 后出图。
+- `--gene`（symbol）经 `org.Hs.eg.db` 的 sqlite 本地映射到 ENSG 后出图（只用系统 `sqlite3`，不需要 R）。
 
 依赖与跳过策略（缺任一项即打印说明并跳过，不会让 `cargo test` 失败）：
 
@@ -122,7 +122,14 @@ Sys.setenv(TRACKTOOLS_TRACKPREP_CMD = "./target/release/tracs")
 `--gene` 输入类型与默认转换（自动校验/归一化）：
 - 未指定 `--gtf`：会把输入归一化为 **gene symbol**（支持传 symbol / Entrez / ENSG），再去查 UCSC `refGene.name2`。
 - 指定了 `--gtf`：会把输入归一化为 **ENSG**（支持传 symbol / Entrez / ENSG），优先用本地 GTF 做离线查找。
-- 本地转换默认使用 `org.Hs.eg.db` 的 sqlite（通过系统 `sqlite3` 读取）。可用 `TRACKTOOLS_ORGDB_SQLITE=/path/to/org.Hs.eg.sqlite` 覆盖路径。
+- 本地转换默认使用 `org.Hs.eg.db` 的 sqlite（通过系统 `sqlite3` 读取，**不需要安装 R**）。可用 `TRACKTOOLS_ORGDB_SQLITE=/path/to/org.Hs.eg.sqlite` 覆盖路径。
+- 从 Bioconductor 直接取该 sqlite（CI 用的就是这种方式）：
+  ```bash
+  curl -L -o /tmp/org.Hs.eg.db.tar.gz \
+    https://bioconductor.org/packages/3.21/data/annotation/src/contrib/org.Hs.eg.db_3.21.0.tar.gz
+  tar -xzf /tmp/org.Hs.eg.db.tar.gz -C /tmp org.Hs.eg.db/inst/extdata/org.Hs.eg.sqlite
+  export TRACKTOOLS_ORGDB_SQLITE=/tmp/org.Hs.eg.db/inst/extdata/org.Hs.eg.sqlite
+  ```
 - 如果没有本地 orgdb，但你希望在线转换，可设置 `TRACKTOOLS_GENE_LOOKUP=online`（需要可联网；使用 mygene.info REST，Rust 内置实现，纯 Rust：reqwest + rustls）。
 
 ## Rust 主程序直接出图（推荐）
