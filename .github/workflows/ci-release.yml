@@ -21,28 +21,27 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Set up R (only for the org.Hs.eg.db symbol lookup)
-        uses: r-lib/actions/setup-r@v2
-        with:
-          r-version: "release"
-          use-public-rspm: true
-
-      - name: Install R dependencies
+      - name: Download org.Hs.eg.db sqlite (for symbol -> Ensembl lookup)
         shell: bash
         run: |
           set -euo pipefail
-          # R is no longer needed to render plots -- that is native Rust now.
-          # It is still used to provide org.Hs.eg.db, whose sqlite backs the
-          # local symbol -> Ensembl lookup exercised by the gene-mode e2e test.
-          Rscript -e 'install.packages("BiocManager", repos = "https://cloud.r-project.org")'
-          Rscript -e 'BiocManager::install("org.Hs.eg.db", ask = FALSE, update = FALSE)'
-          Rscript -e 'stopifnot(requireNamespace("org.Hs.eg.db", quietly = TRUE))'
-          # `tracs` only probes a few hardcoded R library paths, but setup-r
-          # installs into a versioned prefix, so point it at the real sqlite.
-          ORGDB="$(Rscript -e 'cat(system.file("extdata", "org.Hs.eg.sqlite", package = "org.Hs.eg.db"))')"
+          # The gene-mode test can query `--gene CD1D` by symbol, which needs a
+          # symbol -> Ensembl mapping. `org.Hs.eg.db` provides one as a plain
+          # sqlite file, so the Bioconductor tarball is unpacked directly rather
+          # than installing R just to locate it -- the whole test job is now
+          # free of any R dependency.
+          #
+          # Pin the version so the mapping cannot drift under the test.
+          VERSION="3.21.0"
+          URL="https://bioconductor.org/packages/3.21/data/annotation/src/contrib/org.Hs.eg.db_${VERSION}.tar.gz"
+          curl -L --retry 5 --retry-delay 2 -o /tmp/org.Hs.eg.db.tar.gz "$URL"
+          # Only the sqlite is needed; the rest of the tarball is package metadata.
+          tar -xzf /tmp/org.Hs.eg.db.tar.gz -C /tmp org.Hs.eg.db/inst/extdata/org.Hs.eg.sqlite
+          ORGDB="/tmp/org.Hs.eg.db/inst/extdata/org.Hs.eg.sqlite"
           test -f "$ORGDB"
           echo "TRACKTOOLS_ORGDB_SQLITE=$ORGDB" >> "$GITHUB_ENV"
           echo "using orgdb sqlite: $ORGDB"
+          echo "no R interpreter is installed or required"
 
       - name: Set up micromamba (bwtool)
         uses: mamba-org/setup-micromamba@v2
