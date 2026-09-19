@@ -203,6 +203,33 @@ impl PanelWriter {
         );
     }
 
+    /// Text label rotated by `angle_degrees` around its anchor point.
+    ///
+    /// Used for y-axis titles: R's `mtext(side = 2)` draws them vertically, and
+    /// a horizontal label would not fit in the left margin.
+    #[allow(clippy::too_many_arguments)]
+    pub fn text_rotated(
+        &mut self,
+        x: f64,
+        y: f64,
+        label: &str,
+        font_size: f64,
+        anchor: &str,
+        fill: &str,
+        angle_degrees: f64,
+    ) {
+        let _ = write!(
+            self.body,
+            "<text x=\"{x:.3}\" y=\"{y:.3}\" font-size=\"{font_size:.1}\" \
+             font-family=\"Inter, Helvetica, Arial, sans-serif\" \
+             fill=\"{}\" text-anchor=\"{}\" \
+             transform=\"rotate({angle_degrees:.1} {x:.3} {y:.3})\">{}</text>",
+            escape(fill),
+            escape(anchor),
+            escape(label)
+        );
+    }
+
     /// Open polyline from an SVG path string (`M x y L x y ...`).
     ///
     /// The overlay mode connects bin starts with straight segments, which maps

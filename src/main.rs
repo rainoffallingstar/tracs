@@ -52,6 +52,69 @@ enum Command {
     /// Run `track-extract` then render tracks natively into a PDF.
     #[command(alias = "plot")]
     PlotTrack(PlotTrackArgs),
+    /// Draw a profile plot: mean/median signal around a focal point per sample.
+    Profile(ProfileArgs),
+}
+
+#[derive(Parser, Debug)]
+struct ProfileArgs {
+    /// One or more matrix files from `tracs matrix` (repeatable).
+    #[arg(long = "matrix")]
+    matrices: Vec<PathBuf>,
+
+    /// Sample names, comma-separated and matching `--matrix` order.
+    /// Defaults to each matrix's file stem.
+    #[arg(long = "sample")]
+    samples: Vec<String>,
+
+    /// Bases upstream of the focal point (must match how the matrices were built).
+    #[arg(long, default_value_t = 2500)]
+    up: u32,
+
+    /// Bases downstream of the focal point (must match how the matrices were built).
+    #[arg(long, default_value_t = 2500)]
+    down: u32,
+
+    /// How replicates are collapsed into one line: `mean` or `median`.
+    #[arg(long = "stat", default_value = "mean")]
+    stat: String,
+
+    /// Group labels, comma-separated and matching `--matrix` order. When given,
+    /// samples sharing a label are pooled into one line (R's `condition`).
+    #[arg(long = "condition")]
+    condition: Option<String>,
+
+    /// Line colours, comma-separated. Defaults to `profile_plot()`'s palette.
+    #[arg(long = "col")]
+    col: Option<String>,
+
+    /// Output path; `.svg` or `.pdf` decides the format.
+    #[arg(long = "out")]
+    out: PathBuf,
+
+    /// Output working directory for intermediate files (optional).
+    #[arg(long = "work-dir")]
+    work_dir: Option<PathBuf>,
+
+    /// Figure width in inches.
+    #[arg(long = "width", default_value_t = 6.0)]
+    width: f64,
+
+    /// Figure height in inches.
+    #[arg(long = "height", default_value_t = 4.0)]
+    height: f64,
+
+    /// x axis label.
+    #[arg(long)]
+    xlab: Option<String>,
+
+    /// y axis label.
+    #[arg(long)]
+    ylab: Option<String>,
+
+    /// Draw axis ticks and labels.
+    #[arg(long = "show-axis", default_value_t = true, action = clap::ArgAction::Set)]
+    show_axis: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -367,6 +430,7 @@ fn main() -> Result<()> {
         Command::Matrix(args) => cmd_matrix(args),
         Command::TrackExtract(args) => cmd_track_extract(args),
         Command::PlotTrack(args) => cmd_plot_track(args),
+        Command::Profile(args) => cmd_profile(args),
     }
 }
 
@@ -470,6 +534,146 @@ fn cmd_summary(args: SummaryArgs) -> Result<()> {
     }
 
     w.flush()?;
+    Ok(())
+}
+
+/// Reads a `tracs matrix` output file into rows of numbers.
+///
+/// Matrix files are headerless and whitespace/tab separated, one row per region.
+/// Non-numeric tokens yield `NaN` so a malformed cell degrades to "missing"
+/// rather than aborting the whole plot.
+fn read_matrix_file(path: &Path) -> Result<Vec<Vec<f64>>> {
+    let text = fs::read_to_string(path).with_context(|| format!("read matrix: {path:?}"))?;
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let row: Vec<f64> = line
+            .split_whitespace()
+            .map(|token| token.parse::<f64>().unwrap_or(f64::NAN))
+            .collect();
+        if !row.is_empty() {
+            rows.push(row);
+        }
+    }
+    if rows.is_empty() {
+        return Err(anyhow!("matrix file has no numeric rows: {path:?}"));
+    }
+    Ok(rows)
+}
+
+fn cmd_profile(args: ProfileArgs) -> Result<()> {
+    if args.matrices.is_empty() {
+        return Err(anyhow!("profile: at least one --matrix is required"));
+    }
+    if args.up == 0 && args.down == 0 {
+        return Err(anyhow!("profile: --up and --down cannot both be 0"));
+    }
+
+    let stat = plot::profile::SummaryStat::from_name(&args.stat)
+        .ok_or_else(|| anyhow!("profile: --stat must be 'mean' or 'median' (got {:?})", args.stat))?;
+
+    // Sample names come from --sample when given, else each matrix's file stem.
+    let names: Vec<String> = split_csv(&args.samples.join(","));
+    let samples: Vec<(String, Vec<Vec<f64>>)> = args
+        .matrices
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let name = names.get(index).cloned().unwrap_or_else(|| {
+                path.file_stem()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("sample")
+                    .to_string()
+            });
+            Ok((name, read_matrix_file(path)?))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let conditions = args
+        .condition
+        .as_ref()
+        .map(|raw| split_csv(raw))
+        .filter(|values| !values.is_empty());
+    if let Some(conditions) = conditions.as_ref() {
+        if conditions.len() != samples.len() {
+            return Err(anyhow!(
+                "profile: --condition count ({}) must match --matrix count ({})",
+                conditions.len(),
+                samples.len()
+            ));
+        }
+    }
+
+    // With `--condition`, replicates are pooled per group, matching
+    // profile_summarize(condition = ...).
+    let summarized = match conditions.as_ref() {
+        Some(conditions) => plot::profile::summarize_by_condition(&samples, conditions, stat),
+        None => plot::profile::summarize_samples(&samples, stat),
+    };
+    let series: Vec<plot::profile::ProfileSeries> = summarized
+        .into_iter()
+        .map(|(name, values)| plot::profile::ProfileSeries { name, values })
+        .collect();
+
+    let requested_colors = args.col.as_ref().map(|raw| split_csv(raw)).unwrap_or_default();
+    let colors = plot::profile::resolve_profile_colors(&requested_colors, series.len());
+
+    let width = args.width * 72.0;
+    let height = args.height * 72.0;
+    let mut writer = plot::svg::SvgWriter::new(width, height);
+    writer.panel(0.0, 0.0, width, height, |panel| {
+        plot::profile::draw_profile_panel(
+            panel,
+            &series,
+            &colors,
+            args.up,
+            args.down,
+            args.show_axis,
+            DEFAULT_FONT_SIZE,
+            args.xlab.as_deref().unwrap_or(""),
+            args.ylab.as_deref().unwrap_or(""),
+        );
+    });
+    let svg_document = writer.finish();
+
+    match plot::render::OutputFormat::from_path(&args.out) {
+        plot::render::OutputFormat::Svg => {
+            fs::write(&args.out, svg_document)
+                .with_context(|| format!("write SVG: {:?}", args.out))?;
+        }
+        plot::render::OutputFormat::Pdf => {
+            let pdf = plot::render::svg_to_pdf(&svg_document)?;
+            fs::write(&args.out, pdf).with_context(|| format!("write PDF: {:?}", args.out))?;
+        }
+    }
+
+    // Keep the summarized profile alongside the figure when a work dir is given,
+    // so callers can plot from the numbers instead of re-deriving them.
+    if let Some(work_dir) = args.work_dir.as_ref() {
+        fs::create_dir_all(work_dir)
+            .with_context(|| format!("create work dir: {work_dir:?}"))?;
+        let mut out = BufWriter::new(File::create(work_dir.join("profile_summary.tsv"))?);
+        write!(&mut out, "bin")?;
+        for s in &series {
+            write!(&mut out, "\t{}", sanitize_tsv_value(&s.name))?;
+        }
+        writeln!(&mut out)?;
+        let nbins = series.iter().map(|s| s.values.len()).max().unwrap_or(0);
+        for bin in 0..nbins {
+            write!(&mut out, "{bin}")?;
+            for s in &series {
+                match s.values.get(bin) {
+                    Some(value) if value.is_finite() => write!(&mut out, "\t{value}")?,
+                    _ => write!(&mut out, "\tNA")?,
+                }
+            }
+            writeln!(&mut out)?;
+        }
+        out.flush()?;
+    }
+
     Ok(())
 }
 

@@ -12,5 +12,6 @@ pub mod fonts;
 pub mod io;
 pub mod layout;
 pub mod pretty;
+pub mod profile;
 pub mod render;
 pub mod svg;
