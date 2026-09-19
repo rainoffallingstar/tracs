@@ -202,6 +202,20 @@ impl PanelWriter {
             escape(stroke)
         );
     }
+
+    /// Open polyline from an SVG path string (`M x y L x y ...`).
+    ///
+    /// The overlay mode connects bin starts with straight segments, which maps
+    /// onto a single path rather than per-bin rectangles.
+    pub fn path(&mut self, path: &str, stroke: &str, stroke_width: f64) {
+        let _ = write!(
+            self.body,
+            "<path d=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{stroke_width:.3}\" \
+             stroke-linejoin=\"round\" stroke-linecap=\"round\"/>",
+            escape(path),
+            escape(stroke)
+        );
+    }
 }
 
 /// Horizontal placement inside a panel: where the data area starts and ends.
@@ -233,26 +247,52 @@ impl XAxis {
     }
 }
 
-/// Vertical placement for a track whose y axis runs `0 ..= y_max`.
+/// Vertical placement for a track whose y axis spans `y_min ..= y_max`.
+///
+/// `track_plot()` sets each bigWig panel's limits to `c(min(x$max), max(x$max))`
+/// rather than `0 ..= max`, so a track that never reaches zero still fills its
+/// panel instead of leaving a gap.
 #[derive(Clone, Copy, Debug)]
 pub struct YAxis {
     /// Top of the data area (y = `y_max`).
     pub plot_top: f64,
-    /// Baseline (y = 0).
+    /// Bottom of the data area (y = `y_min`).
     pub plot_bottom: f64,
+    pub y_min: f64,
     pub y_max: f64,
 }
 
 impl YAxis {
+    /// Builds an axis mapping `y_min ..= y_max` onto the panel's data area.
+    pub fn new(plot_top: f64, plot_bottom: f64, y_min: f64, y_max: f64) -> Self {
+        Self {
+            plot_top,
+            plot_bottom,
+            y_min,
+            y_max,
+        }
+    }
+
     /// Maps a signal value to a panel y position.
+    ///
+    /// Values outside the range are clamped, matching R's clipping at the plot
+    /// region boundary.
     pub fn map(&self, value: f64) -> f64 {
-        if self.y_max <= 0.0 {
+        let span = self.y_max - self.y_min;
+        if span <= 0.0 {
             return self.plot_bottom;
         }
-        let fraction = (value / self.y_max).clamp(0.0, 1.0);
+        let fraction = ((value - self.y_min) / span).clamp(0.0, 1.0);
         self.plot_bottom - fraction * (self.plot_bottom - self.plot_top)
     }
 
+    /// Position of the zero baseline.
+    ///
+    /// R draws bars with `ybottom = 0` even when the limits start above zero, so
+    /// the overflow is simply clipped; clamping here reproduces that.
+    pub fn baseline(&self) -> f64 {
+        self.map(0.0)
+    }
 }
 
 /// Formats a genomic coordinate the way `track_plot()` does: megabases and
@@ -343,9 +383,9 @@ pub fn draw_signal_panel(
     track_name_left: bool,
     font_size: f64,
 ) {
-    let baseline = y_axis.plot_bottom;
+    let baseline = y_axis.baseline();
     for bin in &track.bins {
-        if !bin.max.is_finite() || bin.max <= 0.0 {
+        if !bin.max.is_finite() || bin.max <= y_axis.y_min {
             continue;
         }
         let left = x_axis.map(bin.start as f64);
@@ -376,31 +416,7 @@ pub fn draw_signal_panel(
         //
         // R's `axis()` also strokes the axis line itself, which is why the two
         // labels appear joined by a vertical rule.
-        panel.line(
-            x_axis.plot_left,
-            y_axis.plot_top,
-            x_axis.plot_left,
-            y_axis.plot_bottom,
-            "black",
-            1.0,
-        );
-
-        // R formats the pair with a *shared* number of decimals (so `c(0, 109.76)`
-        // prints as "0.00" and "109.76"), which is why both labels are built
-        // together rather than independently.
-        let labels = format_axis_pair(0.0, y_axis.y_max);
-        for (value, label) in [0.0, y_axis.y_max].into_iter().zip(labels) {
-            let y = y_axis.map(value);
-            panel.line(x_axis.plot_left - 4.0, y, x_axis.plot_left, y, "black", 1.0);
-            panel.text(
-                x_axis.plot_left - 6.0,
-                y + font_size * 0.35,
-                &label,
-                font_size,
-                "end",
-                "black",
-            );
-        }
+        draw_y_axis(panel, x_axis, y_axis, font_size);
     } else {
         // R prints "[0-60]" style range annotations when the axis is hidden.
         let label = format!("[0-{}]", format_tick(y_axis.y_max));
@@ -422,6 +438,125 @@ pub fn draw_signal_panel(
         track_name_left,
         font_size,
     );
+}
+
+/// Strokes the y axis and labels its two endpoints.
+///
+/// Shared by the bar and overlay renderers because `track_plot()` draws the same
+/// `axis(side = 2, at = c(min, max))` in both modes. R formats the pair with a
+/// *shared* number of decimals (so `c(0, 109.76)` prints "0.00" and "109.76"),
+/// which is why both labels are built together.
+fn draw_y_axis(panel: &mut PanelWriter, x_axis: XAxis, y_axis: YAxis, font_size: f64) {
+    // R's `axis()` strokes the axis line itself, joining the two labels.
+    panel.line(
+        x_axis.plot_left,
+        y_axis.plot_top,
+        x_axis.plot_left,
+        y_axis.plot_bottom,
+        "black",
+        1.0,
+    );
+
+    let labels = format_axis_pair(y_axis.y_min, y_axis.y_max);
+    for (value, label) in [y_axis.y_min, y_axis.y_max].into_iter().zip(labels) {
+        let y = y_axis.map(value);
+        panel.line(x_axis.plot_left - 4.0, y, x_axis.plot_left, y, "black", 1.0);
+        panel.text(
+            x_axis.plot_left - 6.0,
+            y + font_size * 0.35,
+            &label,
+            font_size,
+            "end",
+            "black",
+        );
+    }
+}
+
+/// Draws every sample into one panel as a line plot (`track_overlay = TRUE`).
+///
+/// R draws each track with `points(type = "l")` over a shared range spanning the
+/// minimum and maximum across *all* samples, then adds a `legend("topright")`
+/// keyed by colour. Bars are not used here, so overlapping samples stay readable.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_overlay_panel(
+    panel: &mut PanelWriter,
+    tracks: &[SampleTrack],
+    x_axis: XAxis,
+    y_axis: YAxis,
+    colors: &[String],
+    show_axis: bool,
+    track_names: &[String],
+    font_size: f64,
+) {
+    for (index, track) in tracks.iter().enumerate() {
+        let color = colors
+            .get(index)
+            .map(String::as_str)
+            .unwrap_or(DEFAULT_TRACK_COLOR);
+
+        // R connects bin starts with straight segments, so emit one polyline per
+        // sample rather than per-bin rectangles.
+        let mut path = String::new();
+        for (point_index, bin) in track.bins.iter().enumerate() {
+            if !bin.max.is_finite() {
+                continue;
+            }
+            let x = x_axis.map(bin.start as f64);
+            let y = y_axis.map(bin.max);
+            if point_index == 0 {
+                let _ = write!(path, "M {x:.3} {y:.3}");
+            } else {
+                let _ = write!(path, " L {x:.3} {y:.3}");
+            }
+        }
+        if !path.is_empty() {
+            panel.path(&path, color, 1.5);
+        }
+    }
+
+    panel.line(
+        x_axis.plot_left,
+        y_axis.plot_bottom,
+        x_axis.plot_right,
+        y_axis.plot_bottom,
+        "black",
+        1.0,
+    );
+
+    if show_axis {
+        draw_y_axis(panel, x_axis, y_axis, font_size);
+    }
+
+    // R keys the overlay with legend("topright"); draw it inside the panel so it
+    // cannot collide with the neighbouring tracks.
+    let legend_top = y_axis.plot_top + font_size;
+    for (index, name) in track_names.iter().enumerate() {
+        if name.is_empty() {
+            continue;
+        }
+        let y = legend_top + index as f64 * (font_size + 1.0);
+        let color = colors
+            .get(index)
+            .map(String::as_str)
+            .unwrap_or(DEFAULT_TRACK_COLOR);
+        // Short colour swatch followed by the sample name.
+        panel.line(
+            x_axis.plot_right - 90.0,
+            y - font_size * 0.3,
+            x_axis.plot_right - 78.0,
+            y - font_size * 0.3,
+            color,
+            2.0,
+        );
+        panel.text(
+            x_axis.plot_right - 74.0,
+            y,
+            name,
+            font_size,
+            "start",
+            color,
+        );
+    }
 }
 
 /// Places the track label either inside the panel (left) or as a centred title.
@@ -731,16 +866,26 @@ mod tests {
 
     #[test]
     fn y_axis_maps_from_baseline_upward() {
-        let axis = YAxis {
-            plot_top: 0.0,
-            plot_bottom: 100.0,
-            y_max: 50.0,
-        };
+        let axis = YAxis::new(0.0, 100.0, 0.0, 50.0);
         assert_eq!(axis.map(0.0), 100.0);
         assert_eq!(axis.map(50.0), 0.0);
         assert_eq!(axis.map(25.0), 50.0);
         // Values beyond the axis are clamped, never drawn outside the panel.
         assert_eq!(axis.map(200.0), 0.0);
+        // Zero is the baseline when the range starts at zero.
+        assert_eq!(axis.baseline(), 100.0);
+    }
+
+    #[test]
+    fn y_axis_honours_a_non_zero_minimum() {
+        // track_plot() sets limits to c(min(x$max), max(x$max)), so the minimum
+        // is usually above zero and the bars must still reach the panel floor.
+        let axis = YAxis::new(0.0, 100.0, 10.0, 30.0);
+        assert_eq!(axis.map(10.0), 100.0);
+        assert_eq!(axis.map(30.0), 0.0);
+        assert_eq!(axis.map(20.0), 50.0);
+        // Zero sits below the range, so the baseline clamps to the floor.
+        assert_eq!(axis.baseline(), 100.0);
     }
 
     #[test]
@@ -806,11 +951,7 @@ mod tests {
                     data_start: 1000.0,
                     data_end: 1500.0,
                 },
-                YAxis {
-                    plot_top: 10.0,
-                    plot_bottom: 110.0,
-                    y_max: 20.0,
-                },
+                YAxis::new(10.0, 110.0, 0.0, 20.0),
                 "#000000",
                 true,
                 "s1",

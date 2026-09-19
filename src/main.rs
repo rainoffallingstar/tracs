@@ -1029,7 +1029,14 @@ fn cmd_plot_track(args: PlotTrackArgs) -> Result<()> {
                 .filter_map(|value| value.trim().parse::<f64>().ok())
                 .collect()
         }),
+        y_min: args.y_min.as_ref().map(|values| {
+            split_csv(values)
+                .iter()
+                .filter_map(|value| value.trim().parse::<f64>().ok())
+                .collect()
+        }),
         group_auto_scale: args.group_auto_scale,
+        track_overlay: args.track_overlay,
         layout_ord: split_csv(&args.layout_ord)
             .iter()
             .filter_map(|key| key.trim().chars().next())

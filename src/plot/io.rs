@@ -41,6 +41,18 @@ impl SampleTrack {
             .filter(|value| value.is_finite())
             .fold(f64::NEG_INFINITY, f64::max)
     }
+
+    /// Smallest `max` across bins, ignoring non-finite values.
+    ///
+    /// `track_plot()` sets each panel's limits to `c(min(x$max), max(x$max))`, so
+    /// the lower bound comes from the same column as the upper one.
+    pub fn min_signal(&self) -> f64 {
+        self.bins
+            .iter()
+            .map(|bin| bin.max)
+            .filter(|value| value.is_finite())
+            .fold(f64::INFINITY, f64::min)
+    }
 }
 
 /// The plotted region, from `meta.tsv`.

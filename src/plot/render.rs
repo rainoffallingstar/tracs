@@ -13,8 +13,8 @@ use crate::plot::fonts;
 use crate::plot::io;
 use crate::plot::layout::{make_layout, LayoutRequest, TrackKind};
 use crate::plot::svg::{
-    self, draw_gene_panel, draw_ideogram_panel, draw_peaks_panel, draw_scale_panel,
-    draw_signal_panel, SvgWriter, XAxis, YAxis,
+    self, draw_gene_panel, draw_ideogram_panel, draw_overlay_panel, draw_peaks_panel,
+    draw_scale_panel, draw_signal_panel, SvgWriter, XAxis, YAxis,
 };
 
 /// One `par(mar=)` unit in points.
@@ -76,8 +76,12 @@ pub struct RenderOptions {
     pub cytoband_height: f64,
     /// Explicit y maxima, one per sample (or cycled).
     pub y_max: Option<Vec<f64>>,
+    /// Explicit y minima, one per sample (or cycled).
+    pub y_min: Option<Vec<f64>>,
     /// Auto-scale all bigWig tracks to a shared maximum.
     pub group_auto_scale: bool,
+    /// Draw every bigWig in one panel as a line plot (`track_overlay`).
+    pub track_overlay: bool,
     /// User panel order (`layout_ord`).
     pub layout_ord: Vec<TrackKind>,
     /// Width reserved for the left margin (axis labels / track names).
@@ -109,7 +113,9 @@ impl Default for RenderOptions {
             chromhmm_height: 1.0,
             cytoband_height: 2.0,
             y_max: None,
+            y_min: None,
             group_auto_scale: false,
+            track_overlay: false,
             layout_ord: Vec::new(),
             left_margin: 60.0,
             right_margin: 12.0,
@@ -164,41 +170,95 @@ pub fn load_inputs(work_dir: &Path) -> Result<RenderInputs> {
     })
 }
 
-/// Resolves the y maximum for each bigWig track.
+/// Resolved y-axis range for one bigWig panel.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct YRange {
+    pub min: f64,
+    pub max: f64,
+}
+
+impl YRange {
+    /// Guards against a degenerate range, e.g. a track whose bins are all zero.
+    fn sanitised(self) -> Self {
+        let max = if self.max.is_finite() && self.max > self.min {
+            self.max
+        } else {
+            self.min + 1.0
+        };
+        let min = if self.min.is_finite() { self.min } else { 0.0 };
+        YRange { min, max }
+    }
+}
+
+/// Resolves the y range for each bigWig panel, reproducing `track_plot()`.
 ///
-/// Reproduces `track_plot()`'s logic: explicit `y_max` wins, then
-/// `groupAutoScale` uses one shared maximum, otherwise each track scales to its
-/// own maximum. Values are rounded to two decimals as R does.
-fn resolve_y_maxima(tracks: &[io::SampleTrack], options: &RenderOptions) -> Vec<f64> {
-    if let Some(explicit) = options.y_max.as_ref().filter(|values| !values.is_empty()) {
+/// `track_plot()` uses `c(min(x$max), max(x$max))` per track rather than
+/// `0 ..= max`, so a track that never reaches zero still fills its panel. The
+/// precedence is: explicit `y_max`/`y_min` wins, then `groupAutoScale` shares one
+/// range across tracks, otherwise each track gets its own. Values are rounded to
+/// two decimals as R does.
+fn resolve_y_ranges(tracks: &[io::SampleTrack], options: &RenderOptions) -> Vec<YRange> {
+    let per_track: Vec<(f64, f64)> = tracks
+        .iter()
+        .map(|track| {
+            let max = track.max_signal();
+            let min = track.min_signal();
+            (min, max)
+        })
+        .collect();
+
+    // Explicit `y_max` / `y_min` override everything, cycling when shorter.
+    let explicit_max = options.y_max.as_ref().filter(|values| !values.is_empty());
+    let explicit_min = options
+        .y_min
+        .as_ref()
+        .filter(|values| !values.is_empty());
+    if explicit_max.is_some() || explicit_min.is_some() {
         return (0..tracks.len())
-            .map(|index| explicit[index % explicit.len()])
+            .map(|index| {
+                let (min, max) = per_track[index];
+                YRange {
+                    min: explicit_min
+                        .map(|values| values[index % values.len()])
+                        .unwrap_or(min),
+                    max: explicit_max
+                        .map(|values| values[index % values.len()])
+                        .unwrap_or(max),
+                }
+                .sanitised()
+            })
             .collect();
     }
 
     if options.group_auto_scale {
-        let shared = tracks
+        let shared_min = per_track
             .iter()
-            .map(io::SampleTrack::max_signal)
+            .map(|(min, _)| *min)
+            .filter(|value| value.is_finite())
+            .fold(f64::INFINITY, f64::min);
+        let shared_max = per_track
+            .iter()
+            .map(|(_, max)| *max)
             .filter(|value| value.is_finite())
             .fold(f64::NEG_INFINITY, f64::max);
-        // A track with no signal at all would otherwise produce a zero range.
-        let shared = if shared.is_finite() && shared > 0.0 {
-            shared
-        } else {
-            1.0
-        };
-        return vec![round_two(shared); tracks.len()];
+        let shared = YRange {
+            min: if shared_min.is_finite() { shared_min } else { 0.0 },
+            max: shared_max,
+        }
+        .sanitised();
+        return vec![YRange {
+            min: round_two(shared.min),
+            max: round_two(shared.max),
+        }; tracks.len()];
     }
 
-    tracks
-        .iter()
-        .map(|track| {
-            let max = track.max_signal();
-            if max.is_finite() && max > 0.0 {
-                round_two(max)
-            } else {
-                1.0
+    per_track
+        .into_iter()
+        .map(|(min, max)| {
+            let range = YRange { min, max }.sanitised();
+            YRange {
+                min: round_two(range.min),
+                max: round_two(range.max),
             }
         })
         .collect()
@@ -222,7 +282,12 @@ pub fn render_svg(inputs: &RenderInputs, options: &RenderOptions) -> Result<Stri
         scale_height: options.scale_height,
         chromhmm_height: options.chromhmm_height,
         cytoband_height: options.cytoband_height,
-        bigwig_count: inputs.tracks.len(),
+        // R sets `ntracks = 1` for the overlay so all samples share one panel.
+        bigwig_count: if options.track_overlay {
+            1
+        } else {
+            inputs.tracks.len()
+        },
         has_peaks: !options.peaks.is_empty(),
         // chromHMM panels are not produced by track-extract yet.
         has_chromhmm: false,
@@ -251,7 +316,23 @@ pub fn render_svg(inputs: &RenderInputs, options: &RenderOptions) -> Result<Stri
     };
 
     let colors = svg::resolve_colors(&options.colors, inputs.tracks.len());
-    let y_maxima = resolve_y_maxima(&inputs.tracks, options);
+    let y_ranges = resolve_y_ranges(&inputs.tracks, options);
+
+    // Overlay collapses every bigWig into a single panel, exactly as R does with
+    // `ntracks = 1`. Its range spans the min/max across *all* samples.
+    let overlay_range = if options.track_overlay {
+        resolve_y_ranges(
+            &inputs.tracks,
+            &RenderOptions {
+                group_auto_scale: true,
+                ..options.clone()
+            },
+        )
+        .first()
+        .copied()
+    } else {
+        None
+    };
 
     let mut writer = SvgWriter::new(options.width, options.height);
     let mut cursor_y = 0.0f64;
@@ -288,10 +369,43 @@ pub fn render_svg(inputs: &RenderInputs, options: &RenderOptions) -> Result<Stri
             match panel.kind {
                 TrackKind::BigWig => {
                     let index = panel.bigwig_index.unwrap_or(0);
+
+                    // Overlay mode funnels every sample into this one panel,
+                    // matching R's `ntracks = 1`.
+                    if let Some(range) = overlay_range {
+                        let names: Vec<String> = inputs
+                            .tracks
+                            .iter()
+                            .enumerate()
+                            .map(|(sample_index, track)| {
+                                options
+                                    .track_names
+                                    .as_ref()
+                                    .and_then(|names| names.get(sample_index))
+                                    .cloned()
+                                    .unwrap_or_else(|| track.sample.clone())
+                            })
+                            .collect();
+                        draw_overlay_panel(
+                            draw,
+                            &inputs.tracks,
+                            axis,
+                            YAxis::new(plot_top, plot_bottom, range.min, range.max),
+                            &colors,
+                            options.show_axis,
+                            &names,
+                            options.font_size,
+                        );
+                        return;
+                    }
+
                     let Some(track) = inputs.tracks.get(index) else {
                         return;
                     };
-                    let y_max = y_maxima.get(index).copied().unwrap_or(1.0);
+                    let range = y_ranges.get(index).copied().unwrap_or(YRange {
+                        min: 0.0,
+                        max: 1.0,
+                    });
                     let name = options
                         .track_names
                         .as_ref()
@@ -302,11 +416,7 @@ pub fn render_svg(inputs: &RenderInputs, options: &RenderOptions) -> Result<Stri
                         draw,
                         track,
                         axis,
-                        YAxis {
-                            plot_top,
-                            plot_bottom,
-                            y_max,
-                        },
+                        YAxis::new(plot_top, plot_bottom, range.min, range.max),
                         colors.get(index).map(String::as_str).unwrap_or(svg::DEFAULT_TRACK_COLOR),
                         options.show_axis,
                         &name,
@@ -485,59 +595,134 @@ mod tests {
     }
 
     #[test]
-    fn per_track_scaling_differs_when_not_grouped() {
+    fn per_track_ranges_are_independent_without_grouping() {
         let inputs = inputs(2);
         let options = RenderOptions::default();
-        let maxima = resolve_y_maxima(&inputs.tracks, &options);
-        // Each track scales to its own peak.
-        assert_eq!(maxima.len(), 2);
-        assert!(
-            (maxima[0] - 10.0).abs() < 0.01,
-            "first track should peak at 10, got {}",
-            maxima[0]
-        );
-        assert!(
-            (maxima[1] - 20.0).abs() < 0.01,
-            "second track should peak at 20, got {}",
-            maxima[1]
-        );
+        let ranges = resolve_y_ranges(&inputs.tracks, &options);
+        assert_eq!(ranges.len(), 2);
+
+        // Each track spans its own min..max, matching track_plot()'s
+        // `c(min(x$max), max(x$max))` rather than a shared 0..max.
+        assert!((ranges[0].max - 10.0).abs() < 0.01, "track 0 max: {}", ranges[0].max);
+        assert!((ranges[1].max - 20.0).abs() < 0.01, "track 1 max: {}", ranges[1].max);
+        // The sample ramp starts at 1/10 of the peak, so the minimum is non-zero.
+        assert!((ranges[0].min - 1.0).abs() < 0.01, "track 0 min: {}", ranges[0].min);
+        assert!((ranges[1].min - 2.0).abs() < 0.01, "track 1 min: {}", ranges[1].min);
     }
 
     #[test]
-    fn group_auto_scale_shares_one_maximum() {
+    fn group_auto_scale_shares_one_range() {
         let inputs = inputs(2);
         let options = RenderOptions {
             group_auto_scale: true,
             ..Default::default()
         };
-        let maxima = resolve_y_maxima(&inputs.tracks, &options);
-        assert_eq!(maxima[0], maxima[1], "shared scale must match");
-        assert!((maxima[0] - 20.0).abs() < 0.01, "shared max is the largest peak");
+        let ranges = resolve_y_ranges(&inputs.tracks, &options);
+        assert_eq!(ranges[0], ranges[1], "shared scale must match exactly");
+        // Spans the union of both tracks: min over both, max over both.
+        assert!((ranges[0].min - 1.0).abs() < 0.01, "shared min: {}", ranges[0].min);
+        assert!((ranges[0].max - 20.0).abs() < 0.01, "shared max: {}", ranges[0].max);
     }
 
     #[test]
-    fn explicit_y_max_wins_and_cycles() {
+    fn explicit_y_max_and_min_override_and_cycle() {
         let inputs = inputs(3);
         let options = RenderOptions {
             y_max: Some(vec![99.0]),
+            y_min: Some(vec![-5.0]),
             group_auto_scale: true,
             ..Default::default()
         };
-        let maxima = resolve_y_maxima(&inputs.tracks, &options);
-        assert_eq!(maxima, vec![99.0, 99.0, 99.0]);
+        let ranges = resolve_y_ranges(&inputs.tracks, &options);
+        assert_eq!(ranges.len(), 3);
+        for range in &ranges {
+            assert_eq!(range.max, 99.0);
+            assert_eq!(range.min, -5.0);
+        }
+    }
+
+    #[test]
+    fn explicit_y_max_alone_keeps_the_track_minimum() {
+        let inputs = inputs(1);
+        let options = RenderOptions {
+            y_max: Some(vec![50.0]),
+            ..Default::default()
+        };
+        let ranges = resolve_y_ranges(&inputs.tracks, &options);
+        assert_eq!(ranges[0].max, 50.0);
+        // y_min was not given, so the track's own minimum is kept.
+        assert!((ranges[0].min - 1.0).abs() < 0.01, "min: {}", ranges[0].min);
     }
 
     #[test]
     fn silent_track_gets_a_usable_range() {
-        // A track whose bins are all zero would map every bar to the baseline;
-        // the renderer must fall back to a non-zero range instead of dividing by 0.
+        // A track whose bins are all zero would collapse the axis; the renderer
+        // must fall back to a non-zero span instead of dividing by zero.
         let mut track = sample_track("silent", 0.0);
         for bin in &mut track.bins {
             bin.max = 0.0;
         }
         let options = RenderOptions::default();
-        let maxima = resolve_y_maxima(&[track], &options);
-        assert_eq!(maxima, vec![1.0]);
+        let ranges = resolve_y_ranges(&[track], &options);
+        assert!(
+            ranges[0].max > ranges[0].min,
+            "degenerate range: {:?}",
+            ranges[0]
+        );
+    }
+
+    #[test]
+    fn overlay_collapses_bigwig_panels_and_spans_all_samples() {
+        let inputs = inputs(3);
+        let options = RenderOptions {
+            track_overlay: true,
+            show_ideogram: false,
+            draw_gene_track: false,
+            ..Default::default()
+        };
+
+        // R sets `ntracks = 1`, so the layout holds exactly one bigWig panel.
+        let layout = make_layout(&LayoutRequest {
+            bigwig_height: options.bigwig_height,
+            peaks_height: options.peaks_height,
+            gene_height: options.gene_height,
+            scale_height: options.scale_height,
+            chromhmm_height: options.chromhmm_height,
+            cytoband_height: options.cytoband_height,
+            bigwig_count: 1,
+            has_peaks: false,
+            has_chromhmm: false,
+            has_gene: false,
+            has_cytoband: false,
+            layout_ord: Vec::new(),
+        });
+        let bigwig_panels = layout
+            .panels
+            .iter()
+            .filter(|panel| panel.kind == TrackKind::BigWig)
+            .count();
+        assert_eq!(bigwig_panels, 1, "overlay must use a single bigWig panel");
+
+        let svg_document = render_svg(&inputs, &options).expect("render overlay");
+        // Every sample is drawn as a line, and all three names appear in the key.
+        let paths = svg_document.matches("<path").count();
+        assert_eq!(paths, 3, "expected one polyline per sample, got {paths}");
+        for name in ["s0", "s1", "s2"] {
+            assert!(svg_document.contains(name), "overlay legend missing {name}");
+        }
+    }
+
+    #[test]
+    fn overlay_is_off_by_default() {
+        let inputs = inputs(2);
+        let options = RenderOptions::default();
+        assert!(!options.track_overlay);
+        let svg_document = render_svg(&inputs, &options).expect("render");
+        // Bars use <rect>, so a default render must contain no sample polylines.
+        assert!(
+            !svg_document.contains("<path d=\"M "),
+            "bar mode should not emit overlay polylines"
+        );
     }
 
     #[test]
