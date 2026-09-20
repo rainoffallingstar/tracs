@@ -56,6 +56,8 @@ enum Command {
     Profile(ProfileArgs),
     /// Draw a heatmap of matrices around a focal point, one panel per sample.
     Heatmap(HeatmapArgs),
+    /// Draw a PCA scatter plot of samples from summary tables.
+    Pca(PcaArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -115,6 +117,95 @@ struct HeatmapArgs {
     height: f64,
 
     /// Draw colour bars and axis labels.
+    #[arg(long = "show-axis", default_value_t = true, action = clap::ArgAction::Set)]
+    show_axis: bool,
+}
+
+#[derive(Parser, Debug)]
+struct PcaArgs {
+    /// One or more summary tables, each in `extract_summary()` orientation:
+    /// rows are regions, columns are samples. Repeatable.
+    ///
+    /// A `tracs matrix` file is not a summary table, because its columns are
+    /// bins rather than samples. Build summary tables with
+    /// `tracs summary -with-sum`, one file per sample, then pass them here.
+    #[arg(long = "summary")]
+    summaries: Vec<PathBuf>,
+
+    /// Sample names, comma-separated and matching the summary table's column order.
+    /// Defaults to each table's file stem.
+    #[arg(long = "sample")]
+    samples: Vec<String>,
+
+    /// Group label per sample, comma-separated and matching `--sample` order.
+    /// Points are coloured by group, as `pca_plot(color_by = ...)` does.
+    #[arg(long = "color-by")]
+    color_by: Option<String>,
+
+    /// Point colours, comma-separated. Defaults to `pca_plot()`'s palette.
+    #[arg(long = "col")]
+    col: Option<String>,
+
+    /// Number of most-variable regions to keep, matching `pca_plot()`'s `top`.
+    #[arg(long = "top", default_value_t = 1000)]
+    top: usize,
+
+    /// Apply `log2(x + offset)` before the PCA, matching `pca_plot(log2 = TRUE)`.
+    #[arg(long = "log2", default_value_t = false)]
+    log2: bool,
+
+    /// Offset used by `--log2`, matching `profile_plot()`'s default.
+    #[arg(long = "log2-offset", default_value_t = 0.1)]
+    log2_offset: f64,
+
+    /// Component drawn on the x axis, 1-based (`pca_plot()`'s `xpc`).
+    #[arg(long = "xpc", default_value_t = 1)]
+    xpc: usize,
+
+    /// Component drawn on the y axis, 1-based (`pca_plot()`'s `ypc`).
+    #[arg(long = "ypc", default_value_t = 2)]
+    ypc: usize,
+
+    /// Flip the sign of the x component. R's component signs are arbitrary and
+    /// can differ between builds, so this matches a specific reference figure.
+    #[arg(long = "flip-x", default_value_t = false)]
+    flip_x: bool,
+
+    /// Flip the sign of the y component.
+    #[arg(long = "flip-y", default_value_t = false)]
+    flip_y: bool,
+
+    /// Draw the variance-explained scree panel beside the scatter plot
+    /// (`pca_plot(show_cree = TRUE)`).
+    #[arg(long = "show-cree", default_value_t = true, action = clap::ArgAction::Set)]
+    show_cree: bool,
+
+    /// Sample label size multiplier, matching `pca_plot()`'s `lab_size`.
+    /// Use 0 to hide the labels.
+    #[arg(long = "lab-size", default_value_t = 1.0)]
+    lab_size: f64,
+
+    /// Point size multiplier, matching `pca_plot()`'s `size`.
+    #[arg(long = "point-size", default_value_t = 1.0)]
+    point_size: f64,
+
+    /// Output path; `.svg` or `.pdf` decides the format.
+    #[arg(long = "out")]
+    out: PathBuf,
+
+    /// Output working directory for intermediate files (optional).
+    #[arg(long = "work-dir")]
+    work_dir: Option<PathBuf>,
+
+    /// Figure width in inches.
+    #[arg(long = "width", default_value_t = 6.0)]
+    width: f64,
+
+    /// Figure height in inches.
+    #[arg(long = "height", default_value_t = 5.0)]
+    height: f64,
+
+    /// Draw axis ticks and labels.
     #[arg(long = "show-axis", default_value_t = true, action = clap::ArgAction::Set)]
     show_axis: bool,
 }
@@ -495,6 +586,7 @@ fn main() -> Result<()> {
         Command::PlotTrack(args) => cmd_plot_track(args),
         Command::Profile(args) => cmd_profile(args),
         Command::Heatmap(args) => cmd_heatmap(args),
+        Command::Pca(args) => cmd_pca(args),
     }
 }
 
@@ -859,6 +951,316 @@ fn cmd_heatmap(args: HeatmapArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Reads a `tracs summary` output file into one value column.
+///
+/// `extract_summary()` keeps only the `sum` column from each `bwtool summary`
+/// output, so that is what is read here. The file has a header row in the
+/// `bwtool summary -header -with-sum` form (`chromosome start end size sum ...`),
+/// which is detected by its non-numeric second field rather than by position, so
+/// headerless files work too.
+///
+/// Values are taken from the column named `sum` when a header is present, and
+/// from the fifth column otherwise, matching `x[,.(chromosome, start, end, size, sum)]`.
+fn read_summary_column(path: &Path) -> Result<Vec<f64>> {
+    let text = fs::read_to_string(path).with_context(|| format!("read summary: {path:?}"))?;
+    let mut values = Vec::new();
+    let mut sum_index: Option<usize> = None;
+
+    for (line_number, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = trimmed.split_whitespace().collect();
+
+        // A header row is any row whose `sum` field is not a number.
+        if sum_index.is_none() && line_number < 4 {
+            if let Some(position) = fields.iter().position(|field| *field == "sum") {
+                sum_index = Some(position);
+                continue;
+            }
+        }
+
+        let position = sum_index.unwrap_or(4);
+        let value = fields
+            .get(position)
+            .map(|field| field.parse::<f64>().unwrap_or(f64::NAN))
+            .unwrap_or(f64::NAN);
+        values.push(value);
+    }
+
+    if values.is_empty() {
+        return Err(anyhow!("summary file has no data rows: {path:?}"));
+    }
+    Ok(values)
+}
+
+fn cmd_pca(args: PcaArgs) -> Result<()> {
+    if args.summaries.is_empty() {
+        return Err(anyhow!("pca: at least one --summary is required"));
+    }
+    if args.xpc == 0 || args.ypc == 0 {
+        return Err(anyhow!("pca: --xpc/--ypc are 1-based and must be >= 1"));
+    }
+    if args.top == 0 {
+        return Err(anyhow!("pca: --top must be >= 1"));
+    }
+
+    // Each summary file supplies one sample column. The sample order is the
+    // order the files were given, matching how `extract_summary()` cbind's the
+    // per-bigWig columns.
+    let names = split_csv(&args.samples.join(","));
+    let columns: Vec<(String, Vec<f64>)> = args
+        .summaries
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let name = names.get(index).cloned().unwrap_or_else(|| {
+                path.file_stem()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("sample")
+                    .to_string()
+            });
+            Ok((name, read_summary_column(path)?))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let table = plot::pca::SummaryTable::from_sample_columns(&columns);
+    if table.n_regions() == 0 {
+        return Err(anyhow!("pca: summary tables contained no regions"));
+    }
+    if table.n_samples() < 2 {
+        return Err(anyhow!(
+            "pca: need at least two samples, got {}",
+            table.n_samples()
+        ));
+    }
+
+    let (pca, ranking) = plot::pca::fit_summary_table(
+        &table,
+        args.top,
+        args.log2,
+        args.log2_offset,
+    )
+    .ok_or_else(|| {
+        anyhow!(
+            "pca: cannot fit with {} regions across {} samples",
+            table.n_regions(),
+            table.n_samples()
+        )
+    })?;
+
+    // `pca_plot()` indexes components by name, so a request beyond the fitted
+    // count is a user error worth reporting rather than silently plotting zero.
+    let x_component = args.xpc - 1;
+    let y_component = args.ypc - 1;
+    if x_component >= pca.components.len() || y_component >= pca.components.len() {
+        return Err(anyhow!(
+            "pca: asked for PC{} vs PC{} but only {} components exist \
+             (prcomp returns min(samples, regions); with {} samples and {} regions used)",
+            args.xpc,
+            args.ypc,
+            pca.components.len(),
+            pca.n_samples,
+            pca.n_features
+        ));
+    }
+
+    // Colours: without --color-by everything is black, matching `pca_plot()`.
+    // With a group label per sample, the distinct labels take palette colours in
+    // first-seen order, which is what `condition_colors[...][.N, condition]` does.
+    let group_labels = args
+        .color_by
+        .as_ref()
+        .map(|raw| split_csv(raw))
+        .unwrap_or_default();
+    let legend_entries: Vec<(String, String)> = if group_labels.is_empty() {
+        Vec::new()
+    } else {
+        let mut distinct: Vec<String> = Vec::new();
+        for label in &group_labels {
+            if !distinct.contains(label) {
+                distinct.push(label.clone());
+            }
+        }
+        let requested = split_csv(&args.col.clone().unwrap_or_default());
+        let palette = plot::profile::resolve_profile_colors(&requested, distinct.len());
+        distinct
+            .into_iter()
+            .zip(palette)
+            .collect()
+    };
+
+    let point_colors: Vec<String> = if group_labels.is_empty() {
+        vec![plot::pca::panel::DEFAULT_POINT_COLOR.to_string(); pca.n_samples]
+    } else {
+        (0..pca.n_samples)
+            .map(|sample| {
+                group_labels
+                    .get(sample)
+                    .and_then(|label| {
+                        legend_entries
+                            .iter()
+                            .find(|(name, _)| name == label)
+                            .map(|(_, color)| color.clone())
+                    })
+                    .unwrap_or_else(|| plot::pca::panel::DEFAULT_POINT_COLOR.to_string())
+            })
+            .collect()
+    };
+
+    let mut points = plot::pca::panel::scatter_points(
+        &pca,
+        x_component,
+        y_component,
+        &table.sample_names,
+        &point_colors,
+    );
+    if args.flip_x {
+        for point in points.iter_mut() {
+            point.x = -point.x;
+        }
+    }
+    if args.flip_y {
+        for point in points.iter_mut() {
+            point.y = -point.y;
+        }
+    }
+
+    let x_title = plot::pca::panel::axis_title(
+        &format!("PC{}", args.xpc),
+        pca.variance_explained(x_component),
+    );
+    let y_title = plot::pca::panel::axis_title(
+        &format!("PC{}", args.ypc),
+        pca.variance_explained(y_component),
+    );
+
+    // `show_cree` splits the figure into a scatter panel plus a scree panel,
+    // mirroring R's `layout(matrix(c(1, 2), ncol = 2))`.
+    let width = args.width * 72.0;
+    let height = args.height * 72.0;
+    let (scatter_width, scree_width) = if args.show_cree {
+        (width * 0.72, width * 0.28)
+    } else {
+        (width, 0.0)
+    };
+
+    let mut writer = plot::svg::SvgWriter::new(width, height);
+    writer.panel(0.0, 0.0, scatter_width, height, |draw| {
+        plot::pca::panel::draw_scatter_panel(
+            draw,
+            &points,
+            &x_title,
+            &y_title,
+            &legend_entries,
+            args.show_axis,
+            args.lab_size,
+            args.point_size,
+            DEFAULT_FONT_SIZE,
+        );
+    });
+    if args.show_cree {
+        writer.panel(scatter_width, 0.0, scree_width, height, |draw| {
+            plot::pca::panel::draw_scree_panel(
+                draw,
+                &scree_names(&pca),
+                &scree_values(&pca),
+                args.show_axis,
+                DEFAULT_FONT_SIZE,
+            );
+        });
+    }
+    let svg_document = writer.finish();
+
+    match plot::render::OutputFormat::from_path(&args.out) {
+        plot::render::OutputFormat::Svg => {
+            fs::write(&args.out, svg_document)
+                .with_context(|| format!("write SVG: {:?}", args.out))?;
+        }
+        plot::render::OutputFormat::Pdf => {
+            let pdf = plot::render::svg_to_pdf(&svg_document)?;
+            fs::write(&args.out, pdf).with_context(|| format!("write PDF: {:?}", args.out))?;
+        }
+    }
+
+    // Record the component table so a caller can read the variance shares and
+    // reuse the scores without re-fitting.
+    if let Some(work_dir) = args.work_dir.as_ref() {
+        fs::create_dir_all(work_dir)
+            .with_context(|| format!("create work dir: {work_dir:?}"))?;
+
+        let mut out = BufWriter::new(File::create(work_dir.join("pca_components.tsv"))?);
+        writeln!(&mut out, "component\tsdev\tvariance_explained")?;
+        for index in 0..pca.components.len() {
+            writeln!(
+                &mut out,
+                "PC{}\t{}\t{}",
+                index + 1,
+                pca.sdev(index),
+                pca.variance_explained(index)
+            )?;
+        }
+        out.flush()?;
+
+        let mut out = BufWriter::new(File::create(work_dir.join("pca_scores.tsv"))?);
+        write!(&mut out, "sample")?;
+        for index in 0..pca.components.len() {
+            write!(&mut out, "\tPC{}", index + 1)?;
+        }
+        writeln!(&mut out)?;
+        for sample in 0..pca.n_samples {
+            write!(
+                &mut out,
+                "{}",
+                sanitize_tsv_value(&table.sample_names[sample])
+            )?;
+            for component in &pca.components {
+                write!(
+                    &mut out,
+                    "\t{}",
+                    component.scores.get(sample).copied().unwrap_or(f64::NAN)
+                )?;
+            }
+            writeln!(&mut out)?;
+        }
+        out.flush()?;
+
+        // Which regions actually entered the fit; `--top` can drop most of them.
+        let mut out = BufWriter::new(File::create(work_dir.join("pca_regions.tsv"))?);
+        writeln!(&mut out, "rank\tregion_index\tstandard_deviation\tused")?;
+        let used = table.n_regions().min(args.top);
+        for (rank, region_index) in ranking.iter().enumerate() {
+            writeln!(
+                &mut out,
+                "{}\t{}\t{}\t{}",
+                rank + 1,
+                region_index,
+                plot::pca::region_sd(&table.regions[*region_index]),
+                if rank < used { 1 } else { 0 }
+            )?;
+        }
+        out.flush()?;
+    }
+
+    Ok(())
+}
+
+/// Component names for the scree panel, e.g. `PC1`, `PC2`, ...
+fn scree_names(pca: &plot::pca::Pca) -> Vec<String> {
+    (1..=pca.components.len())
+        .map(|index| format!("PC{index}"))
+        .collect()
+}
+
+/// Variance shares for the scree panel, matching `pca_var_explained`.
+fn scree_values(pca: &plot::pca::Pca) -> Vec<f64> {
+    pca.components
+        .iter()
+        .map(|component| component.variance_explained)
+        .collect()
 }
 
 fn cmd_matrix(args: MatrixArgs) -> Result<()> {

@@ -7,6 +7,9 @@
 - `matrix`：兼容 `bwtool matrix -starts/-ends -tiled-averages=<bin> <up:down> <bed> <bigwig> <out>`
 - `track-extract`：更高层的一次性提取（多 bigWig + loci/gene + binsize + 可选 gene 模型/ideogram），供 `trackplot.R` 直接消费
 - `plot-track`（别名 `plot`）：`track-extract` + **Rust 原生渲染**输出 PDF/SVG（无需 R；默认自动分配配色）
+- `profile`：`profile_plot()` 的原生实现（`tracs matrix` 矩阵 → 每个样本一条均值/中位数曲线）
+- `heatmap`：`profile_heatmap()` 的原生实现（每个样本一个 panel，按行均值/中位数排序）
+- `pca`：`pca_plot()` 的原生实现（`tracs summary` 汇总表 → 样本 PCA 散点图 + 方差解释 scree panel）
 
 > **全流程零 R 依赖。** 早期版本通过 `Rscript trackplot.R` 出图；现在布局、绘图、PDF 生成都在 Rust 内完成（`src/plot/`）。构建、测试、CI 都不安装或调用 R，`tracs plot` 也不需要 R、X11 或显示服务器。
 > 输出格式由 `--out` 的扩展名决定（`.pdf` 或 `.svg`）。
@@ -165,6 +168,41 @@ EOF
 说明：
 - 默认不需要显式指定颜色：`--col auto` 会自动为 tracks 分配离散色盘；也可以传 `--col "#d34,#2980b9,..."` 手动指定。
 - 常用 `track_plot()` 参数已映射为 CLI 参数（例如 `--y-max/--y-min`、`--bw-ord`、`--layout-ord`、`--bw-track-height`、`--gene-track-height`、`--cytoband-track-height`、`--regions-bed`、`--boxcol/--boxcolalpha`）。
+
+## profile / heatmap / pca
+
+这三个子命令对应 `trackplot.R` 里的 `profile_plot()`、`profile_heatmap()`、`pca_plot()`，输入都是前面命令产出的中间文件：
+
+```bash
+# profile：每个样本一条曲线（输入是 `tracs matrix` 的矩阵，可重复 --matrix）
+./target/release/tracs profile \
+  --matrix H3K27ac_1.matrix --matrix H3K4me3_1.matrix \
+  --sample H3K27ac_1,H3K4me3_1 \
+  --up 2500 --down 2500 --stat mean \
+  --out profile.pdf
+
+# heatmap：每个样本一个 panel，按行均值/中位数排序
+./target/release/tracs heatmap \
+  --matrix H3K27ac_1.matrix --matrix H3K4me3_1.matrix \
+  --sample H3K27ac_1,H3K4me3_1 \
+  --sort-by mean --col-pal Blues \
+  --out heatmap.pdf
+
+# pca：样本 PCA 散点图 + 方差解释 scree panel
+# 输入是 `tracs summary -with-sum` 的每样本汇总表（可重复 --summary），不是 `matrix` 矩阵
+./target/release/tracs pca \
+  --summary H3K27ac_1.summary --summary H3K27ac_2.summary --summary H3K4me3_1.summary \
+  --sample H3K27ac_1,H3K27ac_2,H3K4me3_1 \
+  --color-by H3K27ac,H3K27ac,H3K4me3 \
+  --top 1000 --log2 \
+  --out pca.pdf
+```
+
+说明：
+- `pca --summary` 的每行是一个 region，每列是一个样本（即 `extract_summary()` 的 `data` 形状）；`extract_summary()` 只保留每个 `bwtool summary` 输出的 `sum` 列，本实现同样如此。
+- `--top` 会先按行标准差降序取前 N 个 region 再做 PCA（与 `pca_plot()` 一致）；`--log2` 对应 `pca_plot(log2 = TRUE)`，先做 `log2(x + --log2-offset)`。
+- PCA 的方差解释与得分与 R 的 `prcomp()` 对齐，并有用例锁定（`testdata/pca_r_oracle.tsv`，由 R 4.6.0 生成）。**分量符号不保证一致**：R 文档明确说明 `prcomp()` 的符号是任意的、甚至不同 R 构建之间都可能不同，所以这里使用固定约定（最大载荷取正）；如需匹配某张参考图，可用 `--flip-x/--flip-y`。
+- `--work-dir` 会额外写出中间结果便于核对：`heatmap_limits.tsv`、`pca_components.tsv`、`pca_scores.tsv`、`pca_regions.tsv`。
 
 ## Release
 

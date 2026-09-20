@@ -243,6 +243,19 @@ impl PanelWriter {
             escape(stroke)
         );
     }
+
+    /// Filled circle, used for the scatter points in a PCA panel.
+    ///
+    /// R's default `pch = 19` is a solid disc, so a circle is the closest
+    /// primitive; the bins in the track panels are rectangles because that is
+    /// what `track_plot()` draws.
+    pub fn circle(&mut self, x: f64, y: f64, radius: f64, fill: &str) {
+        let _ = write!(
+            self.body,
+            "<circle cx=\"{x:.3}\" cy=\"{y:.3}\" r=\"{radius:.3}\" fill=\"{}\"/>",
+            escape(fill)
+        );
+    }
 }
 
 /// Horizontal placement inside a panel: where the data area starts and ends.

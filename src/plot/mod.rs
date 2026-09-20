@@ -12,6 +12,7 @@ pub mod fonts;
 pub mod heatmap;
 pub mod io;
 pub mod layout;
+pub mod pca;
 pub mod pretty;
 pub mod profile;
 pub mod render;
