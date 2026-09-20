@@ -12,6 +12,9 @@
 *~
 
 # R
+# The default device R opens when a script plots without one; running the
+# oracle generators in this repo would otherwise litter the tree.
+Rplots.pdf
 .Rhistory
 .RData
 .Rproj.user/

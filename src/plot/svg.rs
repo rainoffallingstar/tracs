@@ -299,6 +299,57 @@ impl PanelWriter {
     }
 }
 
+/// An R plot region widened by the 4% padding base graphics applies.
+///
+/// R draws with `xaxs = "r"` / `yaxs = "r"`, which pads the plot region *before*
+/// mapping data onto it. Reproducing the padding matters because `grid()` and
+/// `axis()` draw against the padded region rather than the raw data range, so
+/// without it gridlines and ticks land in the wrong place. `barplot()` and
+/// `plot()` both default to this, which is why the helper lives here rather
+/// than in either panel module.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExpandedRange {
+    /// Padded low end, i.e. R's `par("usr")[1]`.
+    pub low: f64,
+    /// Padded high end, i.e. R's `par("usr")[2]`.
+    pub high: f64,
+}
+
+impl ExpandedRange {
+    /// Applies the 4% padding R uses for `xaxs = "r"` / `yaxs = "r"`.
+    pub fn padded(low: f64, high: f64) -> Self {
+        let span = high - low;
+        // A degenerate range would pad to the same value and make every fraction
+        // a division by zero; R widens a single value by 4% of a unit instead.
+        if span == 0.0 {
+            return Self {
+                low: low - 0.4,
+                high: high + 0.4,
+            };
+        }
+        Self {
+            low: low - 0.04 * span.abs(),
+            high: high + 0.04 * span.abs(),
+        }
+    }
+
+    /// Maps a value in `low ..= high` onto `0.0 ..= 1.0`.
+    pub fn fraction(&self, value: f64) -> f64 {
+        let span = self.high - self.low;
+        if span <= 0.0 {
+            return 0.0;
+        }
+        (value - self.low) / span
+    }
+
+    /// Whether a value falls inside the padded region.
+    ///
+    /// R clips ticks to `usr`, so `pretty()` values outside it are not drawn.
+    pub fn contains(&self, value: f64) -> bool {
+        value >= self.low && value <= self.high
+    }
+}
+
 /// Horizontal placement inside a panel: where the data area starts and ends.
 #[derive(Clone, Copy, Debug)]
 pub struct XAxis {

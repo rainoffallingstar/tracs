@@ -35,6 +35,10 @@
 
 use crate::plot::svg::PanelWriter;
 
+// `ExpandedRange` is shared with the HOMER panel, so it lives in `svg`. Re-
+// exported here because it is part of this module's public vocabulary.
+pub use crate::plot::svg::ExpandedRange;
+
 /// Default colours, taken from `volcano_plot()`'s signature.
 pub const DEFAULT_UP_COLOR: &str = "#d35400";
 pub const DEFAULT_DOWN_COLOR: &str = "#1abc9c";
@@ -180,57 +184,6 @@ impl Volcano {
     /// about the sparser plot instead of leaving the difference unexplained.
     pub fn skipped(&self) -> usize {
         self.peaks.len() - self.drawable().count()
-    }
-}
-
-/// R's `pretty()` bounds for an axis, widened the way base graphics widens a
-/// plot region.
-///
-/// Base R draws with `xaxs = "r"`, which pads the plot region by 4% on each
-/// side **before** mapping data onto it. Reproducing the padding matters
-/// because `grid()` and `axis()` draw against the padded region, not the raw
-/// data range, so without it the gridlines and ticks land in the wrong place.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ExpandedRange {
-    /// Padded low end, i.e. R's `par("usr")[1]`.
-    pub low: f64,
-    /// Padded high end, i.e. R's `par("usr")[2]`.
-    pub high: f64,
-}
-
-impl ExpandedRange {
-    /// Applies the 4% padding R uses for `xaxs = "r"` / `yaxs = "r"`.
-    pub fn padded(low: f64, high: f64) -> Self {
-        let span = high - low;
-        // A degenerate range would pad to the same value and make every
-        // fraction a division by zero; R behaves the same way (a single point
-        // gives `usr` of width 0.08 * the value), so fall back to a unit span.
-        if span == 0.0 {
-            return Self {
-                low: low - 0.4,
-                high: high + 0.4,
-            };
-        }
-        Self {
-            low: low - 0.04 * span.abs(),
-            high: high + 0.04 * span.abs(),
-        }
-    }
-
-    /// Maps a value in `low ..= high` onto `0.0 ..= 1.0`.
-    pub fn fraction(&self, value: f64) -> f64 {
-        let span = self.high - self.low;
-        if span <= 0.0 {
-            return 0.0;
-        }
-        (value - self.low) / span
-    }
-
-    /// Whether a value falls inside the padded region.
-    ///
-    /// R clips ticks to `usr`, so `pretty()` values outside it are not drawn.
-    pub fn contains(&self, value: f64) -> bool {
-        value >= self.low && value <= self.high
     }
 }
 

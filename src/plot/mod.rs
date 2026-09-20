@@ -10,6 +10,7 @@
 
 pub mod fonts;
 pub mod heatmap;
+pub mod homer;
 pub mod io;
 pub mod layout;
 pub mod pca;

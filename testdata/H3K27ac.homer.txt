@@ -1,0 +1,25 @@
+PeakID	Chr	Start	End	Strand	Peak Score	Focus Ratio/Region Size	Annotation	Detailed Annotation	Distance to TSS	Nearest PromoterID	Entrez ID	Nearest Unigene	Nearest Refseq	Nearest Ensembl	Gene Name	Gene Alias	Gene Description	Gene Type
+Peak1	chr1	1250	1450	+	11.0000	0.000000	promoter-TSS (NM_000001)	promoter-TSS (detailed)	-490	NM_000001	1001			ENSG00000000001	GENE001		test gene	protein-coding
+Peak2	chr1	1500	1700	-	12.0000	0.000000	promoter-TSS (NM_000002)	promoter-TSS (detailed)	-480	NM_000002	1002			ENSG00000000002	GENE002		test gene	protein-coding
+Peak3	chr1	1750	1950	+	13.0000	0.000000	promoter-TSS (NM_000003)	promoter-TSS (detailed)	-470	NM_000003	1003			ENSG00000000003	GENE003		test gene	protein-coding
+Peak4	chr1	2000	2200	-	14.0000	0.000000	promoter-TSS (NM_000004)	promoter-TSS (detailed)	-460	NM_000004	1004			ENSG00000000004	GENE004		test gene	protein-coding
+Peak5	chr1	2250	2450	+	15.0000	0.000000	promoter-TSS (NM_000005)	promoter-TSS (detailed)	-450	NM_000005	1005			ENSG00000000005	GENE005		test gene	protein-coding
+Peak6	chr1	2500	2700	-	16.0000	0.000000	promoter-TSS (NM_000006)	promoter-TSS (detailed)	-440	NM_000006	1006			ENSG00000000006	GENE006		test gene	protein-coding
+Peak7	chr1	2750	2950	+	17.0000	0.000000	exon (NM_000007)	exon (detailed)	-430	NM_000007	1007			ENSG00000000007	GENE007		test gene	protein-coding
+Peak8	chr1	3000	3200	-	18.0000	0.000000	exon (NM_000008)	exon (detailed)	-420	NM_000008	1008			ENSG00000000008	GENE008		test gene	protein-coding
+Peak9	chr1	3250	3450	+	19.0000	0.000000	exon (NM_000009)	exon (detailed)	-410	NM_000009	1009			ENSG00000000009	GENE009		test gene	protein-coding
+Peak10	chr1	3500	3700	-	20.0000	0.000000	exon (NM_000010)	exon (detailed)	-400	NM_000010	1010			ENSG00000000010	GENE010		test gene	protein-coding
+Peak11	chr1	3750	3950	+	21.0000	0.000000	intron (NM_000011)	intron (detailed)	-390	NM_000011	1011			ENSG00000000011	GENE011		test gene	protein-coding
+Peak12	chr1	4000	4200	-	22.0000	0.000000	intron (NM_000012)	intron (detailed)	-380	NM_000012	1012			ENSG00000000012	GENE012		test gene	protein-coding
+Peak13	chr1	4250	4450	+	23.0000	0.000000	intron (NM_000013)	intron (detailed)	-370	NM_000013	1013			ENSG00000000013	GENE013		test gene	protein-coding
+Peak14	chr1	4500	4700	-	24.0000	0.000000	Intergenic	Intergenic (detailed)	-360								test gene	
+Peak15	chr1	4750	4950	+	25.0000	0.000000	Intergenic	Intergenic (detailed)	-350								test gene	
+Peak16	chr1	5000	5200	-	26.0000	0.000000	Intergenic	Intergenic (detailed)	-340								test gene	
+Peak17	chr1	5250	5450	+	27.0000	0.000000	Intergenic	Intergenic (detailed)	-330								test gene	
+Peak18	chr1	5500	5700	-	28.0000	0.000000	TTS (NM_000018)	TTS (detailed)	-320	NM_000018	1018			ENSG00000000018	GENE018		test gene	protein-coding
+Peak19	chr1	5750	5950	+	29.0000	0.000000	5' UTR (NM_000019)	5' UTR (detailed)	-310	NM_000019	1019			ENSG00000000019	GENE019		test gene	protein-coding
+Peak20	chr1	6000	6200	-	30.0000	0.000000	3' UTR (NM_000020)	3' UTR (detailed)	-300	NM_000020	1020			ENSG00000000020	GENE020		test gene	protein-coding
+Peak21	chr1	6250	6450	+	31.0000	0.000000	non-coding (NM_000021)	non-coding (detailed)	-290	NM_000021	1021			ENSG00000000021	GENE021		test gene	ncRNA
+Peak22	chr1	6500	6700	-	32.0000	0.000000	NA	NA (detailed)	-280								test gene	
+Peak23	chr1	6750	6950	+	33.0000	0.000000	ncRNA (NM_000023)	ncRNA (detailed)	-270	NM_000023	1023			ENSG00000000023	GENE023		test gene	ncRNA
+Peak24	chr1	7000	7200	-	34.0000	0.000000	ncRNA (NM_000024)	ncRNA (detailed)	-260	NM_000024	1024			ENSG00000000024	GENE024		test gene	ncRNA

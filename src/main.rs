@@ -60,6 +60,57 @@ enum Command {
     Pca(PcaArgs),
     /// Draw a volcano plot from a differential-binding results table.
     Volcano(VolcanoArgs),
+    /// Summarize HOMER `annotatePeaks.pl` output as stacked annotation bars.
+    HomerAnnots(HomerAnnotsArgs),
+}
+
+#[derive(Parser, Debug)]
+struct HomerAnnotsArgs {
+    /// One or more HOMER `annotatePeaks.pl` output files (repeatable), one per
+    /// sample. The `Annotation` column is selected by name, so the usual default
+    /// column set works as-is.
+    #[arg(long = "anno")]
+    anno: Vec<PathBuf>,
+
+    /// Sample names, comma-separated and matching `--anno` order. Defaults to
+    /// each file's name up to its first dot, as `summarize_homer_annots()` does.
+    #[arg(long = "sample")]
+    samples: Vec<String>,
+
+    /// Keep HOMER's literal `NA` annotation as a real category.
+    ///
+    /// Off by default because R drops those peaks: its palette names a colour
+    /// for `NA`, but `fread()` reads the text as a missing value and `%in%`
+    /// never matches it, so unannotated peaks vanish while still shrinking every
+    /// other segment. Enabling this draws them in the palette's `gray70` and
+    /// makes each bar sum to 1.
+    #[arg(long = "keep-unannotated", default_value_t = false)]
+    keep_unannotated: bool,
+
+    /// Legend font size multiplier, matching `summarize_homer_annots()`'s
+    /// `legend_font_size`.
+    #[arg(long = "legend-font-size", default_value_t = 1.0)]
+    legend_font_size: f64,
+
+    /// Output path; `.svg` or `.pdf` decides the format.
+    #[arg(long = "out")]
+    out: PathBuf,
+
+    /// Output working directory for intermediate files (optional).
+    #[arg(long = "work-dir")]
+    work_dir: Option<PathBuf>,
+
+    /// Figure width in inches.
+    #[arg(long = "width", default_value_t = 6.0)]
+    width: f64,
+
+    /// Figure height in inches.
+    #[arg(long = "height", default_value_t = 4.0)]
+    height: f64,
+
+    /// Draw axis ticks and labels.
+    #[arg(long = "show-axis", default_value_t = true, action = clap::ArgAction::Set)]
+    show_axis: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -660,6 +711,7 @@ fn main() -> Result<()> {
         Command::Heatmap(args) => cmd_heatmap(args),
         Command::Pca(args) => cmd_pca(args),
         Command::Volcano(args) => cmd_volcano(args),
+        Command::HomerAnnots(args) => cmd_homer_annots(args),
     }
 }
 
@@ -1563,6 +1615,172 @@ fn cmd_volcano(args: VolcanoArgs) -> Result<()> {
             x_max,
             volcano.y_max()
         )?;
+        out.flush()?;
+    }
+
+    Ok(())
+}
+
+fn cmd_homer_annots(args: HomerAnnotsArgs) -> Result<()> {
+    if args.anno.is_empty() {
+        return Err(anyhow!("homer-annots: at least one --anno is required"));
+    }
+    if !(args.legend_font_size > 0.0) || !args.legend_font_size.is_finite() {
+        return Err(anyhow!(
+            "homer-annots: --legend-font-size must be a positive number"
+        ));
+    }
+
+    let names = split_csv(&args.samples.join(","));
+    let samples: Vec<plot::homer::Sample> = args
+        .anno
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let name = names.get(index).cloned().unwrap_or_default();
+            plot::homer::parse_sample(path, &name)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let summary = plot::homer::build_summary(&samples, args.keep_unannotated);    if summary.categories.is_empty() {
+        return Err(anyhow!(
+            "homer-annots: no peaks fell into a plottable category. R draws only \
+             the categories in its fixed palette ({}); this input had none of them.",
+            plot::homer::ANNOTATION_PALETTE
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    // R drops anything outside the palette silently, which is why its bars stop
+    // short of 1. Surface that rather than reproducing the surprise, and call
+    // out the `NA` case specifically because it follows from `fread()`'s NA
+    // coercion rather than from a decision about that category.
+    for dropped in &summary.dropped {
+        if dropped.is_unmapped_na() {
+            eprintln!(
+                "homer-annots: the `NA` category ({} unannotated peak{}) is not drawn. \
+                 R names a palette colour for it, but `fread()` reads the literal NA text \
+                 as a missing value and `%in%` never matches NA, so the entry is \
+                 unreachable. Pass --keep-unannotated to draw it.",
+                dropped.total(),
+                if dropped.total() == 1 { "" } else { "s" }
+            );
+        } else {
+            eprintln!(
+                "homer-annots: category {:?} is not in the palette, so it is not drawn \
+                 ({} peak{} across all samples). Fractions still divide by the full peak \
+                 count, so the bars sum to less than 1.",
+                dropped.name,
+                dropped.total(),
+                if dropped.total() == 1 { "" } else { "s" }
+            );
+        }
+    }
+    for (index, name) in summary.samples.iter().enumerate() {
+        let drawn = summary.column_sum(index);
+        if drawn < 1.0 - 1e-9 {
+            eprintln!(
+                "homer-annots: {name}: drawn segments cover {drawn:.4} of the bar; \
+                 the rest is in categories outside the palette."
+            );
+        }
+    }
+
+    let width = args.width * 72.0;
+    let height = args.height * 72.0;
+    let mut writer = plot::svg::SvgWriter::new(width, height);
+    writer.panel(0.0, 0.0, width, height, |draw| {
+        plot::homer::draw_homer_panel(
+            draw,
+            &summary,
+            args.legend_font_size,
+            args.show_axis,
+            DEFAULT_FONT_SIZE,
+        );
+    });
+    let svg_document = writer.finish();
+
+    match plot::render::OutputFormat::from_path(&args.out) {
+        plot::render::OutputFormat::Svg => {
+            fs::write(&args.out, svg_document)
+                .with_context(|| format!("write SVG: {:?}", args.out))?;
+        }
+        plot::render::OutputFormat::Pdf => {
+            let pdf = plot::render::svg_to_pdf(&svg_document)?;
+            fs::write(&args.out, pdf).with_context(|| format!("write PDF: {:?}", args.out))?;
+        }
+    }
+
+    // Record the matrix so a caller can reuse the numbers without re-parsing.
+    if let Some(work_dir) = args.work_dir.as_ref() {
+        fs::create_dir_all(work_dir)
+            .with_context(|| format!("create work dir: {work_dir:?}"))?;
+        let mut out = BufWriter::new(File::create(work_dir.join("homer_annotations.tsv"))?);
+        write!(&mut out, "annotation")?;
+        for name in &summary.samples {
+            write!(&mut out, "\t{}", sanitize_tsv_value(name))?;
+        }
+        writeln!(&mut out)?;
+        for (category_index, category) in summary.categories.iter().enumerate() {
+            write!(&mut out, "{}", sanitize_tsv_value(category))?;
+            for sample_index in 0..summary.samples.len() {
+                write!(
+                    &mut out,
+                    "\t{}",
+                    summary.fractions[category_index][sample_index]
+                )?;
+            }
+            writeln!(&mut out)?;
+        }
+        // A trailing row makes the dropped share explicit rather than leaving
+        // the reader to notice the columns do not sum to 1.
+        write!(&mut out, "__dropped__")?;
+        for sample_index in 0..summary.samples.len() {
+            write!(&mut out, "\t{}", 1.0 - summary.column_sum(sample_index))?;
+        }
+        writeln!(&mut out)?;
+        out.flush()?;
+
+        let mut out = BufWriter::new(File::create(work_dir.join("homer_counts.tsv"))?);
+        writeln!(&mut out, "sample\tn_peaks\tunannotated")?;
+        for (index, name) in summary.samples.iter().enumerate() {
+            writeln!(
+                &mut out,
+                "{}\t{}\t{}",
+                sanitize_tsv_value(name),
+                summary.n_peaks[index],
+                samples[index].unannotated()
+            )?;
+        }
+        out.flush()?;
+
+        // R's `leg` column (`Annotation [N]`) is what its commented-out pie
+        // branch would have labelled, and it is the per-sample count anyone
+        // checking the picture by hand wants, so record it.
+        let mut out = BufWriter::new(File::create(work_dir.join("homer_legend.tsv"))?);
+        write!(&mut out, "annotation")?;
+        for name in &summary.samples {
+            write!(&mut out, "\t{}", sanitize_tsv_value(name))?;
+        }
+        writeln!(&mut out)?;
+        for (category_index, labels) in summary
+            .legend_labels(&samples)
+            .into_iter()
+            .enumerate()
+        {
+            write!(
+                &mut out,
+                "{}",
+                sanitize_tsv_value(&summary.categories[category_index])
+            )?;
+            for label in labels {
+                write!(&mut out, "\t{}", sanitize_tsv_value(&label))?;
+            }
+            writeln!(&mut out)?;
+        }
         out.flush()?;
     }
 

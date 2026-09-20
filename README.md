@@ -11,6 +11,7 @@
 - `heatmap`：`profile_heatmap()` 的原生实现（每个样本一个 panel，按行均值/中位数排序）
 - `pca`：`pca_plot()` 的原生实现（`tracs summary` 汇总表 → 样本 PCA 散点图 + 方差解释 scree panel）
 - `volcano`：`volcano_plot()` 的原生实现（差异分析结果表 → volcano 图；不重跑 limma，只接受通用的 logFC / p / padj 表）
+- `homer-annots`：`summarize_homer_annots()` 的原生实现（HOMER `annotatePeaks.pl` 输出 → 每个样本一条注释类型堆叠条形图）
 
 > **全流程零 R 依赖。** 早期版本通过 `Rscript trackplot.R` 出图；现在布局、绘图、PDF 生成都在 Rust 内完成（`src/plot/`）。构建、测试、CI 都不安装或调用 R，`tracs plot` 也不需要 R、X11 或显示服务器。
 > 输出格式由 `--out` 的扩展名决定（`.pdf` 或 `.svg`）。
@@ -238,6 +239,31 @@ EOF
 - 与 R 的一处**有意差异**：`volcano_plot()` 用 `xlims = range(res$logFC)`，只要有任何一行的 `logFC` 是 `NA`，R 的 `range()` 就返回 `NA`，随后 `plot()` 直接以 `need finite 'xlim' values` 失败，整张图什么都画不出来。本实现会跳过这些行、正常画出其余 peak，并在 stderr 提示跳过了多少行（`volcano_summary.tsv` 里也有 `skipped` 列）。
 - `P.Value` 恰好为 0 时（`-log10(0)` 为无穷）会报错退出，因为 R 在同样输入下也会因 `ylim` 为 `Inf` 而失败；此时需要先过滤或给这些行设一个下限。
 - `--work-dir` 会写出 `volcano_summary.tsv`（总数/可绘制数/跳过数/up/down 计数/坐标范围）。
+
+### homer-annots
+
+```bash
+# 每个 --anno 是一个样本的 annotatePeaks.pl 输出
+./target/release/tracs homer-annots \
+  --anno H3K27ac.txt --anno H3K4me3.txt \
+  --out annotations.pdf \
+  --work-dir work
+```
+
+`annotatePeaks.pl` 的默认列即可（按列名 `Annotation` 取列，不依赖列位置）。区块内每个样本一条水平堆叠条形图，颜色为固定类别色盘，右侧标出该样本的 peak 总数。
+
+类别与颜色（按此顺序绘制，也是图例顺序）：
+
+| 类别 | 颜色 |
+| --- | --- |
+| 3pUTR / 5pUTR / Intergenic / TTS / exon / intron / non-coding / NA / promoter-TSS | `#E7298A` / `#D95F02` / `#BEBADA` / `#FB8072` / `#80B1D3` / `#FDB462` / `#FFFFB3` / `gray70` / `#1B9E77` |
+
+说明（这些都是为了与 `summarize_homer_annots()` 的图保持一致而刻意保留的行为）：
+- **分数以全部 peak 为分母，但只画色盘里有的类别**。R 先算 `N / sum(N)`，再按固定色盘过滤行；所以只要有类别落在色盘之外，条形就不会画满到 1。本实现同样如此，并会在 stderr 明确列出被丢弃的类别与比例（`homer_annotations.tsv` 里的 `__dropped__` 行给出剩余比例）。
+- **`NA` 类别永远不会被画**（除非加 `--keep-unannotated`）。色盘里其实为 `NA` 准备了一个 `gray70`，但 R 用 `fread()` 读取时会把 HOMER 写出的字面量 `NA` 当作缺失值，而 `%in%` 永远不会匹配 `NA`，所以那个颜色取不到，未注释的 peak 会静默消失。加 `--keep-unannotated` 后这些 peak 会以 `gray70` 画出，条形也就能画满到 1。
+- 行顺序来自**色盘**而不是数据，所以不论哪个样本占比最大，类别顺序都固定；某样本缺少某类别时按 0 处理。
+- `3' UTR` / `5' UTR` 会重命名为 `3pUTR` / `5pUTR` 以匹配色盘；`promoter-TSS (NM_...)` 这类带最近注释后缀的值会在第一个 `" ("` 处截断。
+- `--work-dir` 会写出 `homer_annotations.tsv`（各类别分数 + `__dropped__`）、`homer_counts.tsv`（每样本 peak 总数与未注释数）、`homer_legend.tsv`（R 的 `Annotation [N]` 标签）。
 
 ## Release
 
