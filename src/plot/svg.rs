@@ -489,6 +489,12 @@ fn round_two(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
 }
 
+/// Public form of [`round_two`], for callers outside this module that need R's
+/// two-decimal convention (e.g. heatmap scale labels).
+pub fn round_two_of(value: f64) -> f64 {
+    round_two(value)
+}
+
 /// Draws a bigWig signal panel: one filled bar per bin, scaled to `y_max`.
 ///
 /// When `show_axis` is false the y range is annotated as `[min-max]` in the top

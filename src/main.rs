@@ -54,6 +54,69 @@ enum Command {
     PlotTrack(PlotTrackArgs),
     /// Draw a profile plot: mean/median signal around a focal point per sample.
     Profile(ProfileArgs),
+    /// Draw a heatmap of matrices around a focal point, one panel per sample.
+    Heatmap(HeatmapArgs),
+}
+
+#[derive(Parser, Debug)]
+struct HeatmapArgs {
+    /// One or more matrix files from `tracs matrix` (repeatable).
+    #[arg(long = "matrix")]
+    matrices: Vec<PathBuf>,
+
+    /// Sample names, comma-separated and matching `--matrix` order.
+    /// Defaults to each matrix's file stem.
+    #[arg(long = "sample")]
+    samples: Vec<String>,
+
+    /// Bases upstream of the focal point (must match how the matrices were built).
+    #[arg(long, default_value_t = 2500)]
+    up: u32,
+
+    /// Bases downstream of the focal point (must match how the matrices were built).
+    #[arg(long, default_value_t = 2500)]
+    down: u32,
+
+    /// Row ordering within each panel: `mean` or `median`.
+    #[arg(long = "sort-by", default_value = "mean")]
+    sort_by: String,
+
+    /// Sequential palette name (e.g. `Blues`, `Viridis`, `Greys`, `Reds`).
+    #[arg(long = "col-pal", default_value = "Blues")]
+    col_pal: String,
+
+    /// Reverse the palette (light where dark was).
+    #[arg(long = "revpal", default_value_t = false)]
+    revpal: bool,
+
+    /// Lower colour limit, comma-separated per sample. Defaults to the matrix min.
+    #[arg(long = "zmin")]
+    zmin: Option<String>,
+
+    /// Upper colour limit, comma-separated per sample. Defaults to the max row mean,
+    /// matching `profile_heatmap()`.
+    #[arg(long = "zmax")]
+    zmax: Option<String>,
+
+    /// Output path; `.svg` or `.pdf` decides the format.
+    #[arg(long = "out")]
+    out: PathBuf,
+
+    /// Output working directory for intermediate files (optional).
+    #[arg(long = "work-dir")]
+    work_dir: Option<PathBuf>,
+
+    /// Figure width in inches.
+    #[arg(long = "width", default_value_t = 6.0)]
+    width: f64,
+
+    /// Height of each heatmap panel in inches.
+    #[arg(long = "height", default_value_t = 3.0)]
+    height: f64,
+
+    /// Draw colour bars and axis labels.
+    #[arg(long = "show-axis", default_value_t = true, action = clap::ArgAction::Set)]
+    show_axis: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -431,6 +494,7 @@ fn main() -> Result<()> {
         Command::TrackExtract(args) => cmd_track_extract(args),
         Command::PlotTrack(args) => cmd_plot_track(args),
         Command::Profile(args) => cmd_profile(args),
+        Command::Heatmap(args) => cmd_heatmap(args),
     }
 }
 
@@ -670,6 +734,126 @@ fn cmd_profile(args: ProfileArgs) -> Result<()> {
                 }
             }
             writeln!(&mut out)?;
+        }
+        out.flush()?;
+    }
+
+    Ok(())
+}
+
+/// Parses a comma-separated list of per-sample numbers.
+fn parse_csv_numbers(raw: Option<&String>) -> Option<Vec<f64>> {
+    raw.map(|text| {
+        split_csv(text)
+            .iter()
+            .filter_map(|value| value.trim().parse::<f64>().ok())
+            .collect()
+    })
+    .filter(|values: &Vec<f64>| !values.is_empty())
+}
+
+fn cmd_heatmap(args: HeatmapArgs) -> Result<()> {
+    if args.matrices.is_empty() {
+        return Err(anyhow!("heatmap: at least one --matrix is required"));
+    }
+    if args.up == 0 && args.down == 0 {
+        return Err(anyhow!("heatmap: --up and --down cannot both be 0"));
+    }
+
+    let sort_by = plot::heatmap::SortBy::from_name(&args.sort_by).ok_or_else(|| {
+        anyhow!(
+            "heatmap: --sort-by must be 'mean' or 'median' (got {:?})",
+            args.sort_by
+        )
+    })?;
+
+    let palette = plot::heatmap::colors::find_palette(&args.col_pal).ok_or_else(|| {
+        anyhow!(
+            "heatmap: unknown --col-pal {:?}; available: {}",
+            args.col_pal,
+            plot::heatmap::colors::palette_names().join(", ")
+        )
+    })?;
+
+    let names = split_csv(&args.samples.join(","));
+    let samples: Vec<(String, Vec<Vec<f64>>)> = args
+        .matrices
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let name = names.get(index).cloned().unwrap_or_else(|| {
+                path.file_stem()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("sample")
+                    .to_string()
+            });
+            Ok((name, read_matrix_file(path)?))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let z_mins = parse_csv_numbers(args.zmin.as_ref());
+    let z_maxs = parse_csv_numbers(args.zmax.as_ref());
+    let panels = plot::heatmap::build_panels(
+        &samples,
+        sort_by,
+        z_mins.as_deref(),
+        z_maxs.as_deref(),
+    );
+
+    // R builds a 255-entry ramp; match that so the gradient resolves identically.
+    let mut ramp = plot::heatmap::colors::resolve_ramp(palette, 255);
+    if args.revpal {
+        plot::heatmap::colors::reverse_ramp(&mut ramp);
+    }
+
+    // One panel per sample, stacked vertically like R's `layout()`.
+    let panel_height = args.height * 72.0;
+    let total_height = panel_height * panels.len() as f64;
+    let width = args.width * 72.0;
+    let mut writer = plot::svg::SvgWriter::new(width, total_height);
+    for (index, panel) in panels.iter().enumerate() {
+        writer.panel(0.0, index as f64 * panel_height, width, panel_height, |draw| {
+            plot::heatmap::draw_heatmap_panel(
+                draw,
+                panel,
+                &ramp,
+                args.up,
+                args.down,
+                args.show_axis,
+                DEFAULT_FONT_SIZE,
+            );
+        });
+    }
+    let svg_document = writer.finish();
+
+    match plot::render::OutputFormat::from_path(&args.out) {
+        plot::render::OutputFormat::Svg => {
+            fs::write(&args.out, svg_document)
+                .with_context(|| format!("write SVG: {:?}", args.out))?;
+        }
+        plot::render::OutputFormat::Pdf => {
+            let pdf = plot::render::svg_to_pdf(&svg_document)?;
+            fs::write(&args.out, pdf).with_context(|| format!("write PDF: {:?}", args.out))?;
+        }
+    }
+
+    // Keep the resolved colour limits so a caller can reproduce or adjust them.
+    if let Some(work_dir) = args.work_dir.as_ref() {
+        fs::create_dir_all(work_dir)
+            .with_context(|| format!("create work dir: {work_dir:?}"))?;
+        let mut out = BufWriter::new(File::create(work_dir.join("heatmap_limits.tsv"))?);
+        writeln!(&mut out, "sample\tz_min\tz_max\trows\tcolumns")?;
+        for panel in &panels {
+            let columns = panel.matrix.iter().map(Vec::len).max().unwrap_or(0);
+            writeln!(
+                &mut out,
+                "{}\t{}\t{}\t{}\t{}",
+                sanitize_tsv_value(&panel.name),
+                panel.z_min,
+                panel.z_max,
+                panel.matrix.len(),
+                columns
+            )?;
         }
         out.flush()?;
     }
