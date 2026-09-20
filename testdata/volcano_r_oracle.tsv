@@ -15,8 +15,8 @@
 # soon as any logFC is NA (range() propagates it), and y_max becomes Inf
 # when any p-value is exactly 0.
 #
-# Regenerate with the generator emitted alongside this oracle; see the
-# volcano module test for the full R snippet.
+# Regenerate by re-running those expressions; the volcano module test
+# carries the same snippet in its oracle comment.
 name	n	logfc	p_value	padj	x_min	x_max	y_max	down	up	legend	legend_error
 mixed	7	-4.2000000000000002,-1.1000000000000001,-0.29999999999999999,0.20000000000000001,0.90000000000000002,2.7000000000000002,5.5	1e-08,0.0040000000000000001,0.29999999999999999,0.59999999999999998,0.02,1.0000000000000001e-05,0.5	9.9999999999999995e-08,0.02,0.80000000000000004,0.90000000000000002,0.050000000000000003,0.0001,0.69999999999999996	-4.2000000000000002	5.5	8	2	2	bottomright	0
 symmetric	5	-3,-1,0,1,3	0.001,0.01,0.5,0.02,0.002	0.01,0.050000000000000003,0.90000000000000002,0.080000000000000002,0.02	-3	3	3	2	2	bottomleft|bottomright	1

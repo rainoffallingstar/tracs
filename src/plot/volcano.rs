@@ -691,8 +691,24 @@ mod tests {
     //
     // `testdata/volcano_r_oracle.tsv` was produced by R 4.6.0 from the same
     // expressions `volcano_plot()` uses, including whether R's own `legend()`
-    // call survives the corner it picked. Regenerate with the generator script
-    // described in the testdata header when it needs extending.
+    // call survives the corner it picked:
+    //
+    //   library(data.table)
+    //   fm <- function(v) paste(sprintf("%.17g", v), collapse = ",")
+    //   fdr <- 0.1
+    //   # for each case (logFC / P.Value / adj.P.Val vectors):
+    //   res <- data.table(logFC = ..., P.Value = ..., adj.P.Val = ...)
+    //   ylims  <- max(-log10(res$P.Value), na.rm = TRUE)
+    //   xlims  <- range(res$logFC)
+    //   res_sig <- res[adj.P.Val < fdr]
+    //   down <- nrow(res_sig[logFC < 0]); up <- nrow(res_sig[logFC > 0])
+    //   leg_pos <- which(abs(xlims) == max(abs(xlims)))
+    //   leg <- ifelse(test = leg_pos == 1, yes = "bottomleft", no = "bottomright")
+    //   # then attempt legend(x = leg, ...) inside a pdf() device and record
+    //   # whether it errored, plus fm(xlims), fm(ylims) and the counts.
+    //
+    // Regenerate by re-running those expressions when the oracle needs
+    // extending.
     // ---------------------------------------------------------------------
 
     /// Splits a comma-separated field, mapping `NA` to NaN.
