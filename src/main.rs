@@ -58,6 +58,78 @@ enum Command {
     Heatmap(HeatmapArgs),
     /// Draw a PCA scatter plot of samples from summary tables.
     Pca(PcaArgs),
+    /// Draw a volcano plot from a differential-binding results table.
+    Volcano(VolcanoArgs),
+}
+
+#[derive(Parser, Debug)]
+struct VolcanoArgs {
+    /// Differential-binding results table, tab- or comma-separated, with a
+    /// header row. Must carry a log fold change, a p-value and an adjusted
+    /// p-value column.
+    ///
+    /// Works with `limma::topTable()`, `DESeq2::results()`, `edgeR::topTags()`,
+    /// or any table with those three columns.
+    #[arg(long = "results")]
+    results: PathBuf,
+
+    /// Column holding the log fold change (aliases: `logFC`, `log2FoldChange`).
+    #[arg(long = "logfc-col")]
+    log_fc_col: Option<String>,
+
+    /// Column holding the raw p-value (aliases: `P.Value`, `pvalue`).
+    #[arg(long = "p-col")]
+    p_col: Option<String>,
+
+    /// Column holding the adjusted p-value (aliases: `adj.P.Val`, `padj`).
+    #[arg(long = "padj-col")]
+    padj_col: Option<String>,
+
+    /// Significance threshold on the adjusted p-value, matching
+    /// `volcano_plot(fdr = ...)`. A peak is significant when `padj < fdr`.
+    #[arg(long = "fdr", default_value_t = 0.1)]
+    fdr: f64,
+
+    /// Colour for significantly up peaks.
+    #[arg(long = "upcol", default_value = plot::volcano::DEFAULT_UP_COLOR)]
+    upcol: String,
+
+    /// Colour for significantly down peaks.
+    #[arg(long = "downcol", default_value = plot::volcano::DEFAULT_DOWN_COLOR)]
+    downcol: String,
+
+    /// Point opacity, matching `volcano_plot()`'s `alpha` (R's `alpha.f`).
+    #[arg(long = "alpha", default_value_t = 0.6)]
+    alpha: f64,
+
+    /// Point size multiplier, matching `volcano_plot()`'s `size`.
+    #[arg(long = "point-size", default_value_t = 0.8)]
+    point_size: f64,
+
+    /// Plot title. Overrides the `contrast` attribute read from the table's
+    /// comment header, if any.
+    #[arg(long = "title")]
+    title: Option<String>,
+
+    /// Output path; `.svg` or `.pdf` decides the format.
+    #[arg(long = "out")]
+    out: PathBuf,
+
+    /// Output working directory for intermediate files (optional).
+    #[arg(long = "work-dir")]
+    work_dir: Option<PathBuf>,
+
+    /// Figure width in inches.
+    #[arg(long = "width", default_value_t = 6.0)]
+    width: f64,
+
+    /// Figure height in inches.
+    #[arg(long = "height", default_value_t = 6.0)]
+    height: f64,
+
+    /// Draw axis ticks and labels.
+    #[arg(long = "show-axis", default_value_t = true, action = clap::ArgAction::Set)]
+    show_axis: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -587,6 +659,7 @@ fn main() -> Result<()> {
         Command::Profile(args) => cmd_profile(args),
         Command::Heatmap(args) => cmd_heatmap(args),
         Command::Pca(args) => cmd_pca(args),
+        Command::Volcano(args) => cmd_volcano(args),
     }
 }
 
@@ -1261,6 +1334,239 @@ fn scree_values(pca: &plot::pca::Pca) -> Vec<f64> {
         .iter()
         .map(|component| component.variance_explained)
         .collect()
+}
+
+/// Splits one table row on tabs or commas and trims the fields.
+///
+/// The differential-binding tables users have on hand come from several tools,
+/// and `topTable()` writes a TSV while `write.csv()`-style exports are commas.
+/// Accepting both avoids forcing a format conversion first.
+fn split_table_row(line: &str) -> Vec<String> {
+    if line.contains('\t') {
+        line.split('\t').map(|field| field.trim().to_string()).collect()
+    } else {
+        line.split(',').map(|field| field.trim().to_string()).collect()
+    }
+}
+
+/// Reads a differential-binding results table into [`plot::volcano::Peak`]s.
+///
+/// Returns the peaks and the contrast label found in the table's comment header,
+/// if any. `topTable()` writes its `contrast` attribute as a `# contrast: ...`
+/// comment when the table is saved with `write.table()`, which is where the
+/// volcano title comes from.
+///
+/// Column lookup is by name, with the aliases the common tools emit. A header row
+/// is required: guessing which unnamed column is the fold change would be worse
+/// than saying so.
+fn read_results_table(
+    path: &Path,
+    log_fc_col: Option<&str>,
+    p_col: Option<&str>,
+    padj_col: Option<&str>,
+) -> Result<(Vec<plot::volcano::Peak>, Option<String>)> {
+    let text = fs::read_to_string(path).with_context(|| format!("read results: {path:?}"))?;
+
+    // `limma`'s attributes survive as comments; look for a contrast label.
+    let mut contrast: Option<String> = None;
+    let mut lines = text.lines().peekable();
+    while let Some(line) = lines.peek() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with('#') {
+            break;
+        }
+        if let Some(rest) = trimmed.trim_start_matches('#').trim().strip_prefix("contrast") {
+            let value = rest.trim_start_matches([':', '=', ' ']).trim();
+            if !value.is_empty() {
+                contrast = Some(value.to_string());
+            }
+        }
+        lines.next();
+    }
+
+    let header_line = lines
+        .find(|line| !line.trim().is_empty())
+        .ok_or_else(|| anyhow!("results table is empty: {path:?}"))?;
+    let header = split_table_row(header_line);
+
+    let log_fc_aliases = ["logfc", "log2foldchange", "log2fc"];
+    let p_aliases = ["p.value", "pvalue", "p_value", "pval"];
+    let padj_aliases = ["adj.p.val", "adj.pval", "padj", "p.adjust", "fdr"];
+
+    let find_column = |explicit: Option<&str>,
+                       aliases: &[&str],
+                       what: &str,
+                       flag: &str|
+     -> Result<usize> {
+        if let Some(name) = explicit {
+            return header
+                .iter()
+                .position(|field| field.eq_ignore_ascii_case(name))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "volcano: {what} column {name:?} not found; table has: {}",
+                        header.join(", ")
+                    )
+                });
+        }
+        header
+            .iter()
+            .position(|field| aliases.iter().any(|alias| field.eq_ignore_ascii_case(alias)))
+            .ok_or_else(|| {
+                anyhow!(
+                    "volcano: could not find a {what} column (looked for {}); \
+                     table has: {}. Use --{flag} to name it explicitly.",
+                    aliases.join(", "),
+                    header.join(", ")
+                )
+            })
+    };
+
+    let log_fc_index = find_column(
+        log_fc_col,
+        &log_fc_aliases,
+        "log fold change",
+        "logfc-col",
+    )?;
+    let p_index = find_column(p_col, &p_aliases, "p-value", "p-col")?;
+    let padj_index = find_column(
+        padj_col,
+        &padj_aliases,
+        "adjusted p-value",
+        "padj-col",
+    )?;
+
+    let mut peaks = Vec::new();
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let fields = split_table_row(trimmed);
+        // A row may legitimately carry NA, which R reads as a missing value
+        // rather than an error, so parsing failures become NaN instead of
+        // aborting the whole table.
+        let number_at = |index: usize| -> f64 {
+            fields
+                .get(index)
+                .map(|field| field.trim().parse::<f64>().unwrap_or(f64::NAN))
+                .unwrap_or(f64::NAN)
+        };
+        peaks.push(plot::volcano::Peak {
+            log_fold_change: number_at(log_fc_index),
+            p_value: number_at(p_index),
+            adjusted_p_value: number_at(padj_index),
+        });
+    }
+
+    if peaks.is_empty() {
+        return Err(anyhow!("results table has no data rows: {path:?}"));
+    }
+    Ok((peaks, contrast))
+}
+
+fn cmd_volcano(args: VolcanoArgs) -> Result<()> {
+    if !(args.fdr > 0.0) || !args.fdr.is_finite() {
+        return Err(anyhow!("volcano: --fdr must be a positive number"));
+    }
+
+    let (peaks, contrast) =
+        read_results_table(
+            &args.results,
+            args.log_fc_col.as_deref(),
+            args.p_col.as_deref(),
+            args.padj_col.as_deref(),
+        )?;
+    let title = args
+        .title
+        .clone()
+        .or(contrast)
+        .unwrap_or_default();
+    let volcano = plot::volcano::Volcano::new(peaks, title);
+
+    if volcano.drawable().count() == 0 {
+        return Err(anyhow!(
+            "volcano: no peaks have finite logFC and p-value; nothing to plot"
+        ));
+    }
+    // R's `range(res$logFC)` returns NA when any fold change is missing, so it
+    // aborts and draws nothing. Plotting the usable peaks is more useful, but
+    // the difference from R must not be silent.
+    if volcano.skipped() > 0 {
+        eprintln!(
+            "volcano: skipping {} of {} peaks that cannot be plotted \
+             (a non-finite logFC, or a p-value of 0)",
+            volcano.skipped(),
+            volcano.peaks.len()
+        );
+    }
+    // R builds `ylim = c(0, max(-log10(P.Value)))`, which is infinite when any
+    // p-value is exactly 0, and then `plot()` aborts. Report it the way R's
+    // error does rather than emitting a figure with no y scale.
+    if !volcano.y_max().is_finite() {
+        return Err(anyhow!(
+            "volcano: a p-value of 0 makes -log10(p) infinite; R fails here too \
+             (\"need finite 'ylim' values\"). Drop or floor those rows."
+        ));
+    }
+
+    let (down_count, up_count) = volcano.counts(args.fdr);
+    let width = args.width * 72.0;
+    let height = args.height * 72.0;
+    let mut writer = plot::svg::SvgWriter::new(width, height);
+    writer.panel(0.0, 0.0, width, height, |draw| {
+        plot::volcano::draw_volcano_panel(
+            draw,
+            &volcano,
+            args.fdr,
+            &args.upcol,
+            &args.downcol,
+            args.alpha,
+            args.point_size,
+            args.show_axis,
+            DEFAULT_FONT_SIZE,
+        );
+    });
+    let svg_document = writer.finish();
+
+    match plot::render::OutputFormat::from_path(&args.out) {
+        plot::render::OutputFormat::Svg => {
+            fs::write(&args.out, svg_document)
+                .with_context(|| format!("write SVG: {:?}", args.out))?;
+        }
+        plot::render::OutputFormat::Pdf => {
+            let pdf = plot::render::svg_to_pdf(&svg_document)?;
+            fs::write(&args.out, pdf).with_context(|| format!("write PDF: {:?}", args.out))?;
+        }
+    }
+
+    // Record the classification so a caller can reuse it without re-deriving it.
+    if let Some(work_dir) = args.work_dir.as_ref() {
+        fs::create_dir_all(work_dir)
+            .with_context(|| format!("create work dir: {work_dir:?}"))?;
+        let mut out = BufWriter::new(File::create(work_dir.join("volcano_summary.tsv"))?);
+        writeln!(
+            &mut out,
+            "total\tdrawable\tskipped\tsignificant_down\tsignificant_up\tfdr\tx_min\tx_max\ty_max"
+        )?;
+        let (x_min, x_max) = volcano.x_range().unwrap_or((f64::NAN, f64::NAN));
+        writeln!(
+            &mut out,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            volcano.peaks.len(),
+            volcano.drawable().count(),
+            volcano.skipped(),
+            down_count,
+            up_count,
+            args.fdr,
+            x_min,
+            x_max,
+            volcano.y_max()
+        )?;
+        out.flush()?;
+    }
+
+    Ok(())
 }
 
 fn cmd_matrix(args: MatrixArgs) -> Result<()> {

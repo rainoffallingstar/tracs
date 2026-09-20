@@ -10,6 +10,7 @@
 - `profile`：`profile_plot()` 的原生实现（`tracs matrix` 矩阵 → 每个样本一条均值/中位数曲线）
 - `heatmap`：`profile_heatmap()` 的原生实现（每个样本一个 panel，按行均值/中位数排序）
 - `pca`：`pca_plot()` 的原生实现（`tracs summary` 汇总表 → 样本 PCA 散点图 + 方差解释 scree panel）
+- `volcano`：`volcano_plot()` 的原生实现（差异分析结果表 → volcano 图；不重跑 limma，只接受通用的 logFC / p / padj 表）
 
 > **全流程零 R 依赖。** 早期版本通过 `Rscript trackplot.R` 出图；现在布局、绘图、PDF 生成都在 Rust 内完成（`src/plot/`）。构建、测试、CI 都不安装或调用 R，`tracs plot` 也不需要 R、X11 或显示服务器。
 > 输出格式由 `--out` 的扩展名决定（`.pdf` 或 `.svg`）。
@@ -169,9 +170,9 @@ EOF
 - 默认不需要显式指定颜色：`--col auto` 会自动为 tracks 分配离散色盘；也可以传 `--col "#d34,#2980b9,..."` 手动指定。
 - 常用 `track_plot()` 参数已映射为 CLI 参数（例如 `--y-max/--y-min`、`--bw-ord`、`--layout-ord`、`--bw-track-height`、`--gene-track-height`、`--cytoband-track-height`、`--regions-bed`、`--boxcol/--boxcolalpha`）。
 
-## profile / heatmap / pca
+## profile / heatmap / pca / volcano
 
-这三个子命令对应 `trackplot.R` 里的 `profile_plot()`、`profile_heatmap()`、`pca_plot()`，输入都是前面命令产出的中间文件：
+这四个子命令分别对应 `trackplot.R` 里的 `profile_plot()`、`profile_heatmap()`、`pca_plot()`、`volcano_plot()`。前三个的输入是 `tracs matrix` 矩阵或 `tracs summary` 汇总表，`volcano` 的输入是差异分析结果表：
 
 ```bash
 # profile：每个样本一条曲线（输入是 `tracs matrix` 的矩阵，可重复 --matrix）
@@ -203,6 +204,40 @@ EOF
 - `--top` 会先按行标准差降序取前 N 个 region 再做 PCA（与 `pca_plot()` 一致）；`--log2` 对应 `pca_plot(log2 = TRUE)`，先做 `log2(x + --log2-offset)`。
 - PCA 的方差解释与得分与 R 的 `prcomp()` 对齐，并有用例锁定（`testdata/pca_r_oracle.tsv`，由 R 4.6.0 生成）。**分量符号不保证一致**：R 文档明确说明 `prcomp()` 的符号是任意的、甚至不同 R 构建之间都可能不同，所以这里使用固定约定（最大载荷取正）；如需匹配某张参考图，可用 `--flip-x/--flip-y`。
 - `--work-dir` 会额外写出中间结果便于核对：`heatmap_limits.tsv`、`pca_components.tsv`、`pca_scores.tsv`、`pca_regions.tsv`。
+
+### volcano
+
+```bash
+# limma::topTable() 的输出（TSV，含 # contrast: ... 注释头）
+./target/release/tracs volcano \
+  --results limma_results.tsv \
+  --fdr 0.1 \
+  --out volcano.pdf
+
+# DESeq2::results() 的输出（CSV，列名不同）
+./target/release/tracs volcano \
+  --results deseq_results.csv \
+  --fdr 0.05 \
+  --out volcano_deseq.pdf
+```
+
+输入只要是带表头的差异分析结果表，且包含 logFC、p-value、adjusted p-value 三列即可，列名会自动识别：
+
+| 列 | 自动识别的列名（不区分大小写） |
+| --- | --- |
+| logFC | `logFC`、`log2FoldChange`、`log2FC` |
+| p-value | `P.Value`、`pvalue`、`p_value`、`pval` |
+| adjusted p-value | `adj.P.Val`、`padj`、`adj.pval`、`p.adjust`、`fdr` |
+
+列名不匹配时可用 `--logfc-col/--p-col/--padj-col` 显式指定。分隔符是 Tab 还是逗号会自动判断。
+
+说明：
+- **本实现不重跑 limma**，只画图。`diffpeak()` 依赖 limma 的 empirical Bayes（`lmFit`/`eBayes`）来算出 `P.Value` 与 `adj.P.Val`；这部分没有等价的 Rust 实现，所以在 R 侧（或任何其他工具）算好后把表交给 `tracs volcano` 即可。
+- 显著性判定与 `volcano_plot()` 完全一致：`adj.P.Val < fdr`（严格小于），再按 `logFC` 正负分成 up/down。因此 `logFC` 为 0 或缺失的显著 peak 不计入 up/down，图例两个计数之和可能小于显著 peak 总数。
+- `--title` 不传时会读取表头注释里的 `contrast`（`topTable()` 保存时会写成 `# contrast: ...`）。
+- 与 R 的一处**有意差异**：`volcano_plot()` 用 `xlims = range(res$logFC)`，只要有任何一行的 `logFC` 是 `NA`，R 的 `range()` 就返回 `NA`，随后 `plot()` 直接以 `need finite 'xlim' values` 失败，整张图什么都画不出来。本实现会跳过这些行、正常画出其余 peak，并在 stderr 提示跳过了多少行（`volcano_summary.tsv` 里也有 `skipped` 列）。
+- `P.Value` 恰好为 0 时（`-log10(0)` 为无穷）会报错退出，因为 R 在同样输入下也会因 `ylim` 为 `Inf` 而失败；此时需要先过滤或给这些行设一个下限。
+- `--work-dir` 会写出 `volcano_summary.tsv`（总数/可绘制数/跳过数/up/down 计数/坐标范围）。
 
 ## Release
 

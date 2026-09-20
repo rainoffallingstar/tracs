@@ -182,13 +182,33 @@ impl PanelWriter {
         anchor: &str,
         fill: &str,
     ) {
+        self.text_weighted(x, y, label, font_size, anchor, fill, "normal");
+    }
+
+    /// Text label with an explicit CSS font weight.
+    ///
+    /// R's `font = 2` means bold, and both the volcano title (`font.main`) and
+    /// its axis labels (`mtext(font = 2)`) use it, so the weight has to be
+    /// selectable per label rather than fixed for the writer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn text_weighted(
+        &mut self,
+        x: f64,
+        y: f64,
+        label: &str,
+        font_size: f64,
+        anchor: &str,
+        fill: &str,
+        weight: &str,
+    ) {
         let _ = write!(
             self.body,
             "<text x=\"{x:.3}\" y=\"{y:.3}\" font-size=\"{font_size:.1}\" \
              font-family=\"Inter, Helvetica, Arial, sans-serif\" \
-             fill=\"{}\" text-anchor=\"{}\">{}</text>",
+             fill=\"{}\" text-anchor=\"{}\" font-weight=\"{}\">{}</text>",
             escape(fill),
             escape(anchor),
+            escape(weight),
             escape(label)
         );
     }
@@ -250,9 +270,30 @@ impl PanelWriter {
     /// primitive; the bins in the track panels are rectangles because that is
     /// what `track_plot()` draws.
     pub fn circle(&mut self, x: f64, y: f64, radius: f64, fill: &str) {
+        self.circle_with_opacity(x, y, radius, fill, 1.0);
+    }
+
+    /// Filled circle drawn at an explicit opacity.
+    ///
+    /// Used for markers that R renders semi-transparently through
+    /// `adjustcolor(alpha.f = ...)`. Opacity is emitted as `fill-opacity` rather
+    /// than baked into an `#RRGGBBAA` fill so that it also applies to the named
+    /// colours callers can pass; one code path therefore covers every colour.
+    pub fn circle_with_opacity(
+        &mut self,
+        x: f64,
+        y: f64,
+        radius: f64,
+        fill: &str,
+        opacity: f64,
+    ) {
+        // R's `adjustcolor` clamps out-of-range alpha, so a caller passing 1.5
+        // gets a fully opaque marker rather than an invalid attribute.
+        let opacity = opacity.clamp(0.0, 1.0);
         let _ = write!(
             self.body,
-            "<circle cx=\"{x:.3}\" cy=\"{y:.3}\" r=\"{radius:.3}\" fill=\"{}\"/>",
+            "<circle cx=\"{x:.3}\" cy=\"{y:.3}\" r=\"{radius:.3}\" fill=\"{}\" \
+             fill-opacity=\"{opacity:.3}\"/>",
             escape(fill)
         );
     }
