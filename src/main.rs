@@ -62,6 +62,55 @@ enum Command {
     Volcano(VolcanoArgs),
     /// Summarize HOMER `annotatePeaks.pl` output as stacked annotation bars.
     HomerAnnots(HomerAnnotsArgs),
+    /// Differential peak analysis: limma's moderated t-test, reimplemented.
+    ///
+    /// Named `diffpeak` after the R function it ports, as the other subcommands
+    /// are; clap would kebab-case the variant to `diff-peak`, so the name is set
+    /// explicitly.
+    #[command(name = "diffpeak")]
+    DiffPeak(DiffPeakArgs),
+}
+
+#[derive(Parser, Debug)]
+struct DiffPeakArgs {
+    /// Summary table in `extract_summary()` orientation: one row per region with
+    /// `chromosome`, `start`, `end`, `size` columns followed by one column per
+    /// sample. This is the shape `tracs summary` produces per sample, merged the
+    /// way `extract_summary()` does.
+    #[arg(long = "summary")]
+    summary: PathBuf,
+
+    /// Coldata TSV with `bw_files`, `bw_sample_names`, and a condition column
+    /// (same shape as `read_coldata()` output). The condition column is named by
+    /// `--condition`.
+    #[arg(long = "coldata")]
+    coldata: PathBuf,
+
+    /// Name of the condition column in the coldata.
+    #[arg(long = "condition", default_value = "condition")]
+    condition: String,
+
+    /// Numerator condition. Omit both `--num` and `--den` to let the contrast
+    /// default to the first two conditions, as `diffpeak()` does.
+    #[arg(long = "num")]
+    num: Option<String>,
+
+    /// Denominator condition. Required when `--num` is given.
+    #[arg(long = "den")]
+    den: Option<String>,
+
+    /// Apply `log2(x + offset)` before testing, matching `diffpeak(log2 = TRUE)`.
+    #[arg(long = "log2", default_value_t = false)]
+    log2: bool,
+
+    /// Offset used by `--log2`, matching `diffpeak()`'s default.
+    #[arg(long = "log2-offset", default_value_t = 0.1)]
+    log2_offset: f64,
+
+    /// Output path for the results table. Written in the same column shape as
+    /// `limma::topTable()`, so it can be passed straight to `tracs volcano`.
+    #[arg(long = "out")]
+    out: PathBuf,
 }
 
 #[derive(Parser, Debug)]
@@ -712,6 +761,7 @@ fn main() -> Result<()> {
         Command::Pca(args) => cmd_pca(args),
         Command::Volcano(args) => cmd_volcano(args),
         Command::HomerAnnots(args) => cmd_homer_annots(args),
+        Command::DiffPeak(args) => cmd_diffpeak(args),
     }
 }
 
@@ -1783,6 +1833,272 @@ fn cmd_homer_annots(args: HomerAnnotsArgs) -> Result<()> {
         }
         out.flush()?;
     }
+
+    Ok(())
+}
+
+/// A summary table plus the coordinates and sample columns it carries.
+struct SummaryMatrix {
+    /// Region coordinates, in row order, as `(chromosome, start, end)`.
+    regions: Vec<(String, i64, i64)>,
+    /// One column per sample, in the table's column order.
+    samples: Vec<String>,
+    /// `expression[row][sample]`, i.e. the transpose of the file's layout.
+    expression: Vec<Vec<f64>>,
+}
+
+/// Reads a summary table in `extract_summary()` orientation.
+///
+/// The first four columns are `chromosome`, `start`, `end`, `size` and the rest
+/// are one column per sample. R selects the sample columns by name from
+/// `colData$bw_sample_names`, so this does the same: the header decides which
+/// columns are which, and a requested name that is absent is an error rather
+/// than a silent positional fallback.
+fn read_summary_matrix(path: &Path) -> Result<SummaryMatrix> {
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("read summary table: {path:?}"))?;
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let header_line = lines
+        .next()
+        .ok_or_else(|| anyhow!("summary table is empty: {path:?}"))?;
+    let header: Vec<&str> = header_line.split('\t').map(str::trim).collect();
+
+    // `extract_summary()` writes chromosome/start/end/size (any order), then one
+    // column per sample.
+    let find = |name: &str| -> Result<usize> {
+        header
+            .iter()
+            .position(|field| field.eq_ignore_ascii_case(name))
+            .ok_or_else(|| {
+                anyhow!(
+                    "summary table is missing a {name:?} column; header: {}",
+                    header.join(", ")
+                )
+            })
+    };
+    let chromosome_index = find("chromosome")?;
+    let start_index = find("start")?;
+    let end_index = find("end")?;
+
+    let coordinate_indices = [chromosome_index, start_index, end_index];
+    let sample_indices: Vec<usize> = (0..header.len())
+        .filter(|index| !coordinate_indices.contains(index))
+        // The `size` column is metadata, not a sample.
+        .filter(|index| !header[*index].eq_ignore_ascii_case("size"))
+        .collect();
+    if sample_indices.is_empty() {
+        return Err(anyhow!(
+            "summary table has no sample columns beyond the coordinates: {path:?}"
+        ));
+    }
+    let samples: Vec<String> = sample_indices
+        .iter()
+        .map(|index| header[*index].to_string())
+        .collect();
+
+    let mut regions = Vec::new();
+    let mut expression = Vec::new();
+    for line in lines {
+        let fields: Vec<&str> = line.split('\t').collect();
+        let start = fields
+            .get(start_index)
+            .and_then(|value| value.trim().parse::<i64>().ok());
+        let end = fields
+            .get(end_index)
+            .and_then(|value| value.trim().parse::<i64>().ok());
+        let (Some(start), Some(end)) = (start, end) else {
+            continue;
+        };
+        regions.push((
+            fields
+                .get(chromosome_index)
+                .map(|value| value.trim().to_string())
+                .unwrap_or_default(),
+            start,
+            end,
+        ));
+        // Parsing failures become NaN, as `fread()` gives R a missing value
+        // rather than aborting the whole file.
+        expression.push(
+            sample_indices
+                .iter()
+                .map(|index| {
+                    fields
+                        .get(*index)
+                        .map(|value| value.trim().parse::<f64>().unwrap_or(f64::NAN))
+                        .unwrap_or(f64::NAN)
+                })
+                .collect(),
+        );
+    }
+
+    if regions.is_empty() {
+        return Err(anyhow!("summary table has no data rows: {path:?}"));
+    }
+    Ok(SummaryMatrix {
+        regions,
+        samples,
+        expression,
+    })
+}
+
+/// Reads the condition label for each sample from a coldata file.
+///
+/// R does `coldata[, condition]` after checking the name is a column, so a
+/// missing column is an error. Rows are matched to `samples` by
+/// `bw_sample_names`, which is also how R's `exprs` selects its columns.
+fn read_conditions(
+    path: &Path,
+    condition_column: &str,
+    samples: &[String],
+) -> Result<Vec<String>> {
+    let text =
+        fs::read_to_string(path).with_context(|| format!("read coldata: {path:?}"))?;
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let header: Vec<String> = lines
+        .next()
+        .ok_or_else(|| anyhow!("coldata is empty: {path:?}"))?
+        .split('\t')
+        .map(|field| field.trim().to_string())
+        .collect();
+
+    let name_index = header
+        .iter()
+        .position(|field| field == "bw_sample_names")
+        .ok_or_else(|| anyhow!("coldata is missing a `bw_sample_names` column: {path:?}"))?;
+    let condition_index = header
+        .iter()
+        .position(|field| field == condition_column)
+        .ok_or_else(|| {
+            anyhow!(
+                "coldata has no condition column {condition_column:?}; available: {}",
+                header.join(", ")
+            )
+        })?;
+
+    let mut by_sample: HashMap<String, String> = HashMap::new();
+    for line in lines {
+        let fields: Vec<&str> = line.split('\t').collect();
+        let (Some(name), Some(condition)) = (
+            fields.get(name_index).map(|value| value.trim()),
+            fields.get(condition_index).map(|value| value.trim()),
+        ) else {
+            continue;
+        };
+        by_sample.insert(name.to_string(), condition.to_string());
+    }
+
+    samples
+        .iter()
+        .map(|sample| {
+            by_sample.get(sample).cloned().ok_or_else(|| {
+                anyhow!(
+                    "coldata has no row for sample {sample:?}; it lists: {}",
+                    by_sample.keys().cloned().collect::<Vec<_>>().join(", ")
+                )
+            })
+        })
+        .collect()
+}
+
+fn cmd_diffpeak(args: DiffPeakArgs) -> Result<()> {
+    let table = read_summary_matrix(&args.summary)?;
+    let conditions = read_conditions(&args.coldata, &args.condition, &table.samples)?;
+
+    let groups = plot::diffpeak::group_conditions(&conditions);
+    let contrast = match (args.num.as_deref(), args.den.as_deref()) {
+        (Some(num), Some(den)) => plot::diffpeak::explicit_contrast(&groups, num, den)?,
+        (None, None) => {
+            let chosen = plot::diffpeak::default_contrast(&groups)?;
+            // R prints which contrast it picked when num/den are omitted; say so
+            // too, since the sign of every fold change follows from it.
+            eprintln!(
+                "diffpeak: --num/--den omitted, using the first two conditions: {}",
+                chosen.label()
+            );
+            chosen
+        }
+        _ => {
+            return Err(anyhow!(
+                "diffpeak: --num and --den must be given together (limma's diffpeak \
+                 stops with \"Num and Den must be provided\" otherwise)"
+            ))
+        }
+    };
+
+    let mut expression = table.expression.clone();
+    let fitted = plot::diffpeak::run(
+        &mut expression,
+        &conditions,
+        &contrast,
+        args.log2,
+        args.log2_offset,
+    )?;
+
+    // limma's `topTable` sorts by P.Value; diffpeak keeps that order.
+    let mut order: Vec<usize> = (0..fitted.peaks.len()).collect();
+    order.sort_by(|left, right| {
+        fitted.peaks[*left]
+            .p_value
+            .partial_cmp(&fitted.peaks[*right].p_value)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Match `topTable`'s column set and the `# contrast:` comment that
+    // `tracs volcano` reads, so the two compose without a conversion step.
+    let mut out = BufWriter::new(
+        File::create(&args.out).with_context(|| format!("create out: {:?}", args.out))?,
+    );
+    writeln!(
+        &mut out,
+        "# contrast: {}",
+        sanitize_tsv_value(&fitted.contrast)
+    )?;
+    writeln!(
+        &mut out,
+        "# df.prior: {}\t# s2.prior: {}\t# df.residual: {}\t# df.total: {}\t# stdev.unscaled: {}",
+        fitted.prior.df_prior,
+        fitted.prior.s2_prior,
+        fitted.df_residual,
+        fitted.df_total,
+        fitted.stdev_unscaled
+    )?;
+    if fitted.prior.s2_prior.is_nan() {
+        writeln!(&mut out, "# warning: s2.prior could not be estimated")?;
+    }
+    writeln!(
+        &mut out,
+        "# B (limma's log-odds) is not computed; see `tracs diffpeak --help` for why"
+    )?;
+    writeln!(
+        &mut out,
+        "chromosome\tstart\tend\tlogFC\tAveExpr\tt\tP.Value\tadj.P.Val"
+    )?;
+    for index in order {
+        let peak = &fitted.peaks[index];
+        let (chromosome, start, end) = &table.regions[peak.row_index];
+        writeln!(
+            &mut out,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            sanitize_tsv_value(chromosome),
+            start,
+            end,
+            peak.log_fold_change,
+            peak.average_expression,
+            peak.moderated_t,
+            peak.p_value,
+            peak.adjusted_p_value
+        )?;
+    }
+    out.flush()?;
+
+    eprintln!(
+        "diffpeak: {} regions tested, contrast {}, df.prior {}, df.total {}",
+        fitted.peaks.len(),
+        fitted.contrast,
+        fitted.prior.df_prior,
+        fitted.df_total
+    );
 
     Ok(())
 }

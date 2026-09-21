@@ -1,0 +1,7 @@
+bw_files	bw_sample_names	condition
+H3K27ac_1.bigWig	H3K27ac_1	H3K27ac
+H3K27ac_2.bigWig	H3K27ac_2	H3K27ac
+H3K4me3_1.bigWig	H3K4me3_1	H3K4me3
+H3K4me3_2.bigWig	H3K4me3_2	H3K4me3
+Input_1.bigWig	Input_1	Input
+Input_2.bigWig	Input_2	Input

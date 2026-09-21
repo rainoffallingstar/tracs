@@ -1,0 +1,7 @@
+bw_files	bw_sample_names	condition
+ChIP_1.bigWig	ChIP_1	ChIP
+ChIP_2.bigWig	ChIP_2	ChIP
+ChIP_3.bigWig	ChIP_3	ChIP
+Input_1.bigWig	Input_1	Input
+Input_2.bigWig	Input_2	Input
+Input_3.bigWig	Input_3	Input

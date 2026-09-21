@@ -19,3 +19,5 @@ pub mod profile;
 pub mod render;
 pub mod svg;
 pub mod volcano;
+
+pub mod diffpeak;

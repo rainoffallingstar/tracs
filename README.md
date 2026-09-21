@@ -12,6 +12,7 @@
 - `pca`：`pca_plot()` 的原生实现（`tracs summary` 汇总表 → 样本 PCA 散点图 + 方差解释 scree panel）
 - `volcano`：`volcano_plot()` 的原生实现（差异分析结果表 → volcano 图；不重跑 limma，只接受通用的 logFC / p / padj 表）
 - `homer-annots`：`summarize_homer_annots()` 的原生实现（HOMER `annotatePeaks.pl` 输出 → 每个样本一条注释类型堆叠条形图）
+- `diffpeak`：`diffpeak()` 的原生实现（汇总表 + coldata → 差异 peak 表，含 logFC / P.Value / adj.P.Val；**Rust 内重写了 limma 的 moderated t 检验**，数值对齐 limma 3.68.4）
 
 > **全流程零 R 依赖。** 早期版本通过 `Rscript trackplot.R` 出图；现在布局、绘图、PDF 生成都在 Rust 内完成（`src/plot/`）。构建、测试、CI 都不安装或调用 R，`tracs plot` 也不需要 R、X11 或显示服务器。
 > 输出格式由 `--out` 的扩展名决定（`.pdf` 或 `.svg`）。
@@ -264,6 +265,42 @@ EOF
 - 行顺序来自**色盘**而不是数据，所以不论哪个样本占比最大，类别顺序都固定；某样本缺少某类别时按 0 处理。
 - `3' UTR` / `5' UTR` 会重命名为 `3pUTR` / `5pUTR` 以匹配色盘；`promoter-TSS (NM_...)` 这类带最近注释后缀的值会在第一个 `" ("` 处截断。
 - `--work-dir` 会写出 `homer_annotations.tsv`（各类别分数 + `__dropped__`）、`homer_counts.tsv`（每样本 peak 总数与未注释数）、`homer_legend.tsv`（R 的 `Annotation [N]` 标签）。
+
+### diffpeak
+
+```bash
+# 汇总表 + coldata → 差异 peak 表
+./target/release/tracs diffpeak \
+  --summary summary.tsv \
+  --coldata coldata.tsv \
+  --condition condition \
+  --log2 \
+  --out diffpeak.tsv
+
+# 指定对比方向（不指定则用前两个 condition，与 R 一致）
+./target/release/tracs diffpeak \
+  --summary summary.tsv --coldata coldata.tsv \
+  --num Input --den H3K27ac \
+  --out reversed.tsv
+```
+
+- `--summary`：`extract_summary()` 形态的汇总表（`chromosome`/`start`/`end`/`size` + 每样本一列）。样本列按**列名**识别，与 `colData$bw_sample_names` 一致。
+- `--coldata`：`read_coldata()` 形态的表，需要有 `bw_sample_names` 列与 `--condition` 指定的条件列。
+- `--num/--den` 必须同时给或不给。不给时按 R 的规则取「前两个 condition」作为 `num-den`，并在 stderr 说明选了什么。
+- 输出列与 `limma::topTable()` 一致（`logFC`/`AveExpr`/`t`/`P.Value`/`adj.P.Val`），并按 `P.Value` 升序排序；表头带 `# contrast:` 注释，所以可以直接接 `tracs volcano`：
+
+```bash
+./target/release/tracs diffpeak --summary summary.tsv --coldata coldata.tsv --log2 --out dp.tsv
+./target/release/tracs volcano --results dp.tsv --fdr 0.1 --out volcano.pdf
+```
+
+说明（`diffpeak()` 的统计量由 limma 提供，所以这里的关键是**数值对齐 limma 而不是「差不多」**）：
+
+- **在 Rust 内重写了 limma 的经验贝叶斯 moderated t 检验**：`lmFit`（一元设计，即各组均值 + 组内合并方差）→ `squeezeVar`/`fitFDist`（先验方差与先验自由度）→ moderated t → `df.total` → p 值 → BH 校正。对齐 limma 3.68.4，并有用例逐区域锁定（7 个场景、940 个 region，`testdata/diffpeak_r_oracle.tsv`）。
+- 用到的特殊函数（digamma / trigamma / tetragamma / trigammaInverse / 不完全 beta）都为本仓库自实现，另有 228 个取值与 R 逐个比对（`testdata/diffpeak_special_r_oracle.tsv`）。t 分布的尾部通过恒等式 `2*P(T>|t|) = I_x(df/2, 1/2)`（`x = df/(df+t²)`）化为正则化不完全 beta，因此不需要单独的 t 分布 CDF。
+- 测试场景**故意包含不平衡分组**（3v2、3v3）。分组样本数相等时 `stdev.unscaled = sqrt(1/n_num + 1/n_den)` 恰好为 1，若实现里写死 1 也不会被发现——所以专门构造了不平衡用例。同理，`AveExpr` 是所有样本的普通行均值（不是「组均值的均值」），两者只在平衡设计下相等。
+- **不计算 limma 的 `B`（log-odds）**：它来自 `tmixture.matrix`，需要带 log 概率的 t 分布反函数；而下游没有任何地方读它（`volcano_plot()` 只用 `logFC`/`P.Value`/`adj.P.Val`），`diffpeak()` 本身又按 `P.Value` 重排，所以 `B` 也不影响输出顺序。输出里因此没有该列，而不是给一个看起来像 limma 但并非 limma 的数。
+- 退化输入的处理与 limma 略有不同，且在文档中有说明：若某个 region 的组内方差恰好为 0 且 logFC 也为 0，limma 因为 QR 分解会留下约 `1e-16` 的残差，从而得到一个受浮点噪声支配的 t 值；本实现按精确算术处理，报 `t = 0`、`p = 1`。若 logFC 非 0 而方差为 0，则报 `t = ±inf`、`p = 0`（确定性证据），而不是把 NaN 传进排序。
 
 ## Release
 
